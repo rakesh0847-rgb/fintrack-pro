@@ -681,7 +681,7 @@ class _EntryPageState extends State<EntryPage> {
           ),
           const SizedBox(height: 16),
           DropdownButtonFormField<String>(
-            value: category,
+            initialValue: category,
             decoration: const InputDecoration(
               labelText: 'Category / വിഭാഗം',
               border: OutlineInputBorder(),
