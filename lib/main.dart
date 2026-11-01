@@ -57,14 +57,20 @@ class FinanceDatabase {
   Future<int> deleteTransaction(int id) async =>
       (await database).delete('transactions', where: 'id = ?', whereArgs: [id]);
 
-  Future<List<Map<String, dynamic>>> getTransactions({String? scope, DateTime? from, DateTime? to}) async {
-    final db = await database;
+  Future<List<Map<String, dynamic>>> getTransactions({String? scope, DateTime? from, DateTime? to, int? projectId}) async {
     final clauses = <String>[];
     final args = <Object?>[];
-    if (scope != null) { clauses.add('scope = ?'); args.add(scope); }
-    if (from != null) { clauses.add('date >= ?'); args.add(DateTime(from.year, from.month, from.day).toIso8601String()); }
-    if (to != null) { clauses.add('date < ?'); args.add(DateTime(to.year, to.month, to.day).add(const Duration(days: 1)).toIso8601String()); }
-    return db.query('transactions', where: clauses.isEmpty ? null : clauses.join(' AND '), whereArgs: args.isEmpty ? null : args, orderBy: 'date DESC, id DESC');
+    if (scope != null) { clauses.add('t.scope = ?'); args.add(scope); }
+    if (projectId != null) { clauses.add('t.project_id = ?'); args.add(projectId); }
+    if (from != null) { clauses.add('t.date >= ?'); args.add(DateTime(from.year, from.month, from.day).toIso8601String()); }
+    if (to != null) { clauses.add('t.date < ?'); args.add(DateTime(to.year, to.month, to.day).add(const Duration(days: 1)).toIso8601String()); }
+    return (await database).rawQuery('''
+      SELECT t.*, p.name AS project_name
+      FROM transactions t
+      LEFT JOIN projects p ON p.id = t.project_id
+      ${clauses.isEmpty ? '' : 'WHERE ${clauses.join(' AND ')}'}
+      ORDER BY t.date DESC, t.id DESC
+    ''', args);
   }
 
   Future<Map<String, double>> getSummary({String? scope, DateTime? from, DateTime? to}) async {
@@ -81,6 +87,18 @@ class FinanceDatabase {
     final row = rows.first;
     final income = (row['income'] as num).toDouble();
     final expense = (row['expense'] as num).toDouble();
+    return {'income': income, 'expense': expense, 'balance': income - expense};
+  }
+
+  Future<Map<String, double>> getProjectSummary(int projectId) async {
+    final rows = await (await database).rawQuery('''
+      SELECT
+        COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) AS income,
+        COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) AS expense
+      FROM transactions WHERE project_id = ?
+    ''', [projectId]);
+    final income = (rows.first['income'] as num).toDouble();
+    final expense = (rows.first['expense'] as num).toDouble();
     return {'income': income, 'expense': expense, 'balance': income - expense};
   }
 
@@ -217,8 +235,8 @@ class _AccountPageState extends State<AccountPage> {
                     final income = r['type'] == 'income';
                     return Card(child: ListTile(
                       leading: CircleAvatar(backgroundColor: (income ? green : Colors.red).withValues(alpha: .1), child: Icon(income ? Icons.south_west : Icons.north_east, color: income ? green : Colors.red)),
-                      title: Text(r['category'] as String, style: const TextStyle(fontWeight: FontWeight.w600)),
-                      subtitle: Text('${dateLabel(r['date'] as String?)}${(r['note'] ?? '').toString().isEmpty ? '' : ' • ${r['note']}'}'),
+                      title: Text((r['project_name'] ?? r['category']).toString(), style: const TextStyle(fontWeight: FontWeight.w600)),
+                      subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)}${(r['note'] ?? '').toString().isEmpty ? '' : ' • ${r['note']}'}'),
                       trailing: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
                         Text('${income ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: income ? green : Colors.red, fontWeight: FontWeight.bold)),
                         const SizedBox(height: 3),
@@ -241,7 +259,8 @@ class _AccountPageState extends State<AccountPage> {
 class EntryPage extends StatefulWidget {
   final String scope, type;
   final Map<String,dynamic>? record;
-  const EntryPage({super.key, required this.scope, required this.type, this.record});
+  final int? initialProjectId;
+  const EntryPage({super.key, required this.scope, required this.type, this.record, this.initialProjectId});
   @override
   State<EntryPage> createState() => _EntryPageState();
 }
@@ -256,7 +275,7 @@ class _EntryPageState extends State<EntryPage> {
   final expenseCategories = const ['Food','Travel','Rent','Salary','Materials','Bills','Other'];
   bool get isIncome => widget.type == 'income';
   @override
-  void initState() { super.initState(); final r = widget.record; if (r != null) { amount.text = (r['amount'] as num).toString(); note.text = (r['note'] ?? '').toString(); category = r['category'] as String; selectedDate = DateTime.tryParse(r['date'] as String) ?? DateTime.now(); projectId = r['project_id'] as int?; } }
+  void initState() { super.initState(); projectId = widget.initialProjectId; final r = widget.record; if (r != null) { amount.text = (r['amount'] as num).toString(); note.text = (r['note'] ?? '').toString(); category = r['category'] as String; selectedDate = DateTime.tryParse(r['date'] as String) ?? DateTime.now(); projectId = r['project_id'] as int?; } }
   @override
   void dispose() { amount.dispose(); note.dispose(); super.dispose(); }
   Future<void> save() async {
@@ -315,8 +334,8 @@ class _ReportsPageState extends State<ReportsPage> {
                   return Column(children: rows.data!.map((r) {
                     final inc = r['type'] == 'income';
                     return Card(child: ListTile(
-                      title: Text('${r['scope']} • ${r['category']}'),
-                      subtitle: Text(dateLabel(r['date'] as String?)),
+                      title: Text('${r['scope']} • ${(r['project_name'] ?? r['category']).toString()}'),
+                      subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)}'),
                       trailing: Text('${inc ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: inc ? green : Colors.red, fontWeight: FontWeight.bold)),
                     ));
                   }).toList());
@@ -329,6 +348,110 @@ class _ReportsPageState extends State<ReportsPage> {
     );
   }
   Widget _reportTile(String title, double value, Color color, IconData icon) => Card(child: ListTile(leading: CircleAvatar(backgroundColor: color.withValues(alpha: .1), child: Icon(icon,color:color)), title: Text(title), trailing: Text(money(value), style: TextStyle(fontWeight: FontWeight.bold, color: color, fontSize: 16))));
+}
+
+class ProjectDetailsPage extends StatefulWidget {
+  final Map<String, dynamic> project;
+  const ProjectDetailsPage({super.key, required this.project});
+  @override
+  State<ProjectDetailsPage> createState() => _ProjectDetailsPageState();
+}
+
+class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
+  Future<void> add(String type) async {
+    final saved = await Navigator.push<bool>(context, MaterialPageRoute(
+      builder: (_) => EntryPage(scope: 'Business', type: type, initialProjectId: widget.project['id'] as int),
+    ));
+    if (saved == true && mounted) setState(() {});
+  }
+
+  Future<void> edit(Map<String, dynamic> row) async {
+    final saved = await Navigator.push<bool>(context, MaterialPageRoute(
+      builder: (_) => EntryPage(scope: row['scope'] as String, type: row['type'] as String, record: row),
+    ));
+    if (saved == true && mounted) setState(() {});
+  }
+
+  Future<void> delete(Map<String, dynamic> row) async {
+    final yes = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
+      title: const Text('Delete transaction?'),
+      content: const Text('This transaction will be permanently deleted.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+      ],
+    ));
+    if (yes == true) {
+      await FinanceDatabase.instance.deleteTransaction(row['id'] as int);
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final project = widget.project;
+    final projectId = project['id'] as int;
+    final budget = (project['budget'] as num?)?.toDouble() ?? 0;
+    return Scaffold(
+      appBar: AppBar(title: Text(project['name'] as String)),
+      body: FutureBuilder<Map<String, double>>(
+        future: FinanceDatabase.instance.getProjectSummary(projectId),
+        builder: (context, summary) {
+          final d = summary.data ?? {'income': 0.0, 'expense': 0.0, 'balance': 0.0};
+          final received = d['income']!;
+          final expense = d['expense']!;
+          final receivable = budget - received;
+          return ListView(padding: const EdgeInsets.all(16), children: [
+            Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text((project['customer'] ?? '').toString(), style: TextStyle(color: Colors.grey.shade700)),
+              const SizedBox(height: 14),
+              _projectMetric('Project Budget', money(budget)),
+              _projectMetric('Total Received', money(received), color: green),
+              _projectMetric('Total Expenses', money(expense), color: Colors.red),
+              _projectMetric('Balance to Receive', money(receivable), color: receivable > 0 ? Colors.orange.shade800 : green),
+              const Divider(height: 24),
+              _projectMetric('Net Cash Flow', money(d['balance']), color: d['balance']! >= 0 ? green : Colors.red),
+            ]))),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: FilledButton.icon(onPressed: () => add('income'), icon: const Icon(Icons.add), label: const Text('Add Income'))),
+              const SizedBox(width: 10),
+              Expanded(child: FilledButton.tonalIcon(onPressed: () => add('expense'), icon: const Icon(Icons.remove), label: const Text('Add Expense'))),
+            ]),
+            const SizedBox(height: 20),
+            const Text('Project Transactions', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: FinanceDatabase.instance.getTransactions(projectId: projectId),
+              builder: (context, snap) {
+                if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+                final rows = snap.data!;
+                if (rows.isEmpty) return const Padding(padding: EdgeInsets.all(20), child: Text('No transactions for this project yet.'));
+                return Column(children: rows.map((r) {
+                  final isIncome = r['type'] == 'income';
+                  return Card(child: ListTile(
+                    leading: CircleAvatar(backgroundColor: (isIncome ? green : Colors.red).withValues(alpha: .1),
+                      child: Icon(isIncome ? Icons.south_west : Icons.north_east, color: isIncome ? green : Colors.red)),
+                    title: Text((r['category'] ?? (isIncome ? 'Income' : 'Expense')).toString()),
+                    subtitle: Text('${dateLabel(r['date'] as String?)}${(r['note'] ?? '').toString().isEmpty ? '' : ' • ${r['note']}'}'),
+                    trailing: Text('${isIncome ? '+' : '-'}${money(r['amount'] as num)}',
+                      style: TextStyle(color: isIncome ? green : Colors.red, fontWeight: FontWeight.bold)),
+                    onTap: () => edit(r),
+                    onLongPress: () => delete(r),
+                  ));
+                }).toList());
+              },
+            ),
+          ]);
+        },
+      ),
+    );
+  }
+
+  Widget _projectMetric(String title, String value, {Color? color}) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 5),
+    child: Row(children: [Expanded(child: Text(title)), Text(value, style: TextStyle(fontWeight: FontWeight.bold, color: color))]),
+  );
 }
 
 class ProjectsPage extends StatefulWidget {
@@ -407,6 +530,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
           title: Text(r['name'] as String, style: const TextStyle(fontWeight: FontWeight.bold)),
           subtitle: Text('${(r['customer'] ?? '').toString()}\nBudget: ${money(r['budget'] as num?)}'),
           isThreeLine: true,
+          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => ProjectDetailsPage(project: r))).then((_) { if (mounted) setState(() {}); }),
           trailing: IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: () => deleteProject(r['id'] as int)),
         ))).toList());
       },
