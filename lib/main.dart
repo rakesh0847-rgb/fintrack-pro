@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
@@ -64,7 +65,7 @@ class FinanceDatabase {
     final dbFile = p.join(dbPath, 'fintrack_pro.db');
     _database = await openDatabase(
       dbFile,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,9 +85,15 @@ class FinanceDatabase {
           budget REAL DEFAULT 0,
           start_date TEXT
         )''');
+        await db.execute('''CREATE TABLE invoices (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT NOT NULL UNIQUE, customer TEXT NOT NULL, phone TEXT, address TEXT,
+          invoice_date TEXT NOT NULL, due_date TEXT, items_json TEXT NOT NULL, subtotal REAL NOT NULL, total REAL NOT NULL,
+          status TEXT NOT NULL DEFAULT 'Unpaid', notes TEXT
+        )''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) { await db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'); }
+        if (oldVersion < 3) { await db.execute('''CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT NOT NULL UNIQUE, customer TEXT NOT NULL, phone TEXT, address TEXT, invoice_date TEXT NOT NULL, due_date TEXT, items_json TEXT NOT NULL, subtotal REAL NOT NULL, total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Unpaid', notes TEXT)'''); }
       },
     );
     return _database!;
@@ -173,6 +180,20 @@ class FinanceDatabase {
 
   Future<int> deleteProject(int id) async =>
       (await database).delete('projects', where: 'id = ?', whereArgs: [id]);
+
+  Future<List<Map<String, dynamic>>> getInvoices() async => (await database).query('invoices', orderBy: 'id DESC');
+  Future<int> saveInvoice(Map<String, dynamic> data, {int? id}) async {
+    final db = await database;
+    if (id == null) return db.insert('invoices', data);
+    return db.update('invoices', data, where: 'id = ?', whereArgs: [id]);
+  }
+  Future<void> deleteInvoice(int id) async => (await database).delete('invoices', where: 'id = ?', whereArgs: [id]);
+  Future<String> nextInvoiceNumber() async {
+    final rows = await (await database).rawQuery('SELECT number FROM invoices ORDER BY id DESC LIMIT 1');
+    var next = 1;
+    if (rows.isNotEmpty) { final match = RegExp(r'(\d+)$').firstMatch(rows.first['number'].toString()); if (match != null) next = (int.tryParse(match.group(1)!) ?? 0) + 1; }
+    return 'INV-${next.toString().padLeft(4, '0')}';
+  }
 }
 
 class FinTrackApp extends StatelessWidget {
@@ -229,6 +250,7 @@ class _HomePageState extends State<HomePage> {
         const SizedBox(height: 14), Text(t('Quick Access'), style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 10),
         Row(children: [Expanded(child: _quickCard(t('Add Income'), Icons.add_circle, green, () => quickEntry('income'))), const SizedBox(width: 10), Expanded(child: _quickCard(t('Add Expense'), Icons.remove_circle, Colors.red, () => quickEntry('expense')))]),
         const SizedBox(height: 10), Row(children: [Expanded(child: _quickCard(t('Reports'), Icons.bar_chart, navy, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsPage())))), const SizedBox(width: 10), Expanded(child: _quickCard(t('Projects'), Icons.folder, Colors.deepOrange, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProjectsPage()))))]),
+        const SizedBox(height: 10), _quickCard('Normal Invoice', Icons.receipt_long, green, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const InvoicesPage())).then((_) { if (mounted) setState(() {}); })),
         const SizedBox(height: 18), Center(child: Text('FinTrack Pro • Personal, Family & Business', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)))
       ]);
     }),
@@ -651,4 +673,108 @@ class _ProjectsPageState extends State<ProjectsPage> {
       },
     ),
   );
+}
+
+
+// Standalone normal invoices. These records are intentionally separate from Business Income.
+class InvoicesPage extends StatefulWidget {
+  const InvoicesPage({super.key});
+  @override State<InvoicesPage> createState() => _InvoicesPageState();
+}
+class _InvoicesPageState extends State<InvoicesPage> {
+  Future<void> refresh() async { if (mounted) setState(() {}); }
+  Future<void> createOrEdit([Map<String,dynamic>? invoice]) async {
+    final changed = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => InvoiceEditorPage(invoice: invoice)));
+    if (changed == true) refresh();
+  }
+  Future<void> remove(Map<String,dynamic> invoice) async {
+    final yes = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('Delete invoice?'), content: const Text('This invoice will be permanently deleted.'), actions: [TextButton(onPressed: () => Navigator.pop(ctx,false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx,true), child: const Text('Delete'))]));
+    if (yes == true) { await FinanceDatabase.instance.deleteInvoice(invoice['id'] as int); refresh(); }
+  }
+  Future<void> setStatus(Map<String,dynamic> invoice, String status) async { await FinanceDatabase.instance.saveInvoice({...invoice, 'status': status}, id: invoice['id'] as int); refresh(); }
+  @override Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Normal Invoices')),
+    floatingActionButton: FloatingActionButton.extended(onPressed: () => createOrEdit(), icon: const Icon(Icons.add), label: const Text('Create Invoice')),
+    body: FutureBuilder<List<Map<String,dynamic>>>(future: FinanceDatabase.instance.getInvoices(), builder: (context, snap) {
+      if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+      final rows = snap.data!;
+      if (rows.isEmpty) return const Center(child: Text('No invoices yet. Tap Create Invoice to begin.'));
+      return ListView(padding: const EdgeInsets.all(12), children: rows.map((r) => Card(child: ListTile(
+        leading: CircleAvatar(backgroundColor: r['status']=='Paid' ? green.withValues(alpha:.12) : Colors.orange.withValues(alpha:.12), child: Icon(Icons.receipt_long, color: r['status']=='Paid' ? green : Colors.orange)),
+        title: Text('${r['number']} • ${r['customer']}', style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text('${dateLabel(r['invoice_date'] as String?)}  •  ${r['status']}'),
+        trailing: PopupMenuButton<String>(onSelected: (v) { if (v=='edit') createOrEdit(r); if (v=='paid') setStatus(r,'Paid'); if (v=='unpaid') setStatus(r,'Unpaid'); if (v=='delete') remove(r); if (v=='pdf') exportInvoicePdf(r); }, itemBuilder: (_) => [const PopupMenuItem(value:'pdf',child:Text('Share / Print PDF')), const PopupMenuItem(value:'edit',child:Text('Edit')), if (r['status']=='Unpaid') const PopupMenuItem(value:'paid',child:Text('Mark as Paid')), if (r['status']=='Paid') const PopupMenuItem(value:'unpaid',child:Text('Mark as Unpaid')), const PopupMenuItem(value:'delete',child:Text('Delete'))]),
+        onTap: () => createOrEdit(r),
+      ))).toList());
+    }),
+  );
+}
+
+class InvoiceEditorPage extends StatefulWidget {
+  final Map<String,dynamic>? invoice;
+  const InvoiceEditorPage({super.key, this.invoice});
+  @override State<InvoiceEditorPage> createState() => _InvoiceEditorPageState();
+}
+class _InvoiceEditorPageState extends State<InvoiceEditorPage> {
+  final customer = TextEditingController(), phone = TextEditingController(), address = TextEditingController(), notes = TextEditingController();
+  final List<Map<String,dynamic>> items = [];
+  DateTime invoiceDate = DateTime.now();
+  DateTime? dueDate;
+  String number = 'INV-0001', status = 'Unpaid';
+  bool loading = true, saving = false;
+  double get total => items.fold(0, (sum, item) => sum + ((double.tryParse(item['qty'].toString()) ?? 0) * (double.tryParse(item['rate'].toString()) ?? 0)));
+  @override void initState() { super.initState(); _load(); }
+  Future<void> _load() async {
+    final r = widget.invoice;
+    if (r == null) { number = await FinanceDatabase.instance.nextInvoiceNumber(); }
+    else {
+      number = r['number'].toString(); customer.text = (r['customer']??'').toString(); phone.text = (r['phone']??'').toString(); address.text = (r['address']??'').toString(); notes.text = (r['notes']??'').toString();
+      invoiceDate = DateTime.tryParse(r['invoice_date'].toString()) ?? DateTime.now(); dueDate = DateTime.tryParse((r['due_date']??'').toString()); status = r['status'].toString();
+      final decoded = jsonDecode(r['items_json'].toString()) as List; items.addAll(decoded.map((e) => Map<String,dynamic>.from(e as Map)));
+    }
+    if (items.isEmpty) items.add({'description':'','qty':'1','rate':'0'});
+    if (mounted) setState(() => loading = false);
+  }
+  @override void dispose() { customer.dispose(); phone.dispose(); address.dispose(); notes.dispose(); super.dispose(); }
+  Future<void> chooseDate(bool due) async { final initial = due ? (dueDate ?? invoiceDate) : invoiceDate; final d = await showDatePicker(context: context, initialDate: initial, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() { if (due) dueDate=d; else invoiceDate=d; }); }
+  Future<void> addItem() async => setState(() => items.add({'description':'','qty':'1','rate':'0'}));
+  Future<void> save() async {
+    if (customer.text.trim().isEmpty || items.any((e) => e['description'].toString().trim().isEmpty) || total <= 0 || items.any((e) => (double.tryParse(e['qty'].toString())??0)<=0 || (double.tryParse(e['rate'].toString())??-1)<0)) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter customer, item descriptions, valid quantities and rates.'))); return; }
+    setState(() => saving=true);
+    final data = {'number':number,'customer':customer.text.trim(),'phone':phone.text.trim(),'address':address.text.trim(),'invoice_date':invoiceDate.toIso8601String(),'due_date':dueDate?.toIso8601String(),'items_json':jsonEncode(items),'subtotal':total,'total':total,'status':status,'notes':notes.text.trim()};
+    try { await FinanceDatabase.instance.saveInvoice(data, id: widget.invoice?['id'] as int?); if (mounted) Navigator.pop(context,true); }
+    catch(e) { if(mounted) { setState(()=>saving=false); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Could not save invoice: $e'))); } }
+  }
+  @override Widget build(BuildContext context) {
+    if (loading) return Scaffold(appBar: AppBar(title: const Text('Invoice')), body: const Center(child:CircularProgressIndicator()));
+    return Scaffold(appBar: AppBar(title: Text(widget.invoice==null?'Create Invoice':'Edit Invoice')), body: ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('INVOICE', style: TextStyle(fontSize:28, fontWeight:FontWeight.bold, letterSpacing:3, color:navy)),
+      const SizedBox(height:14), Text('Invoice No: $number', style: const TextStyle(fontWeight:FontWeight.bold)),
+      const SizedBox(height:12), TextField(controller:customer, decoration:const InputDecoration(labelText:'Issued To / Customer', border:OutlineInputBorder())),
+      const SizedBox(height:10), TextField(controller:phone, keyboardType:TextInputType.phone, decoration:const InputDecoration(labelText:'Phone (optional)', border:OutlineInputBorder())),
+      const SizedBox(height:10), TextField(controller:address, maxLines:2, decoration:const InputDecoration(labelText:'Address (optional)', border:OutlineInputBorder())),
+      const SizedBox(height:10), Wrap(spacing:10, runSpacing:8, children:[OutlinedButton.icon(onPressed:()=>chooseDate(false), icon:const Icon(Icons.calendar_today), label:Text('Date: ${dateLabel(invoiceDate.toIso8601String())}')), OutlinedButton.icon(onPressed:()=>chooseDate(true), icon:const Icon(Icons.event), label:Text('Due: ${dueDate==null?'Not set':dateLabel(dueDate!.toIso8601String())}'))]),
+      const SizedBox(height:18), const Divider(), const Text('DESCRIPTION                         RATE          QTY          TOTAL', style:TextStyle(fontWeight:FontWeight.bold,fontSize:12)), const Divider(),
+      ...List.generate(items.length,(i) { final item=items[i]; final qty=double.tryParse(item['qty'].toString())??0, rate=double.tryParse(item['rate'].toString())??0; return Padding(padding:const EdgeInsets.only(bottom:12), child: Column(children:[TextFormField(initialValue:item['description'].toString(), decoration:const InputDecoration(labelText:'Description',border:OutlineInputBorder()), onChanged:(v)=>item['description']=v), const SizedBox(height:7), Row(children:[Expanded(child:TextFormField(initialValue:item['rate'].toString(), keyboardType:const TextInputType.numberWithOptions(decimal:true), decoration:const InputDecoration(labelText:'Rate',prefixText:'₹ ',border:OutlineInputBorder()), onChanged:(v)=>setState(()=>item['rate']=v))), const SizedBox(width:8), Expanded(child:TextFormField(initialValue:item['qty'].toString(), keyboardType:const TextInputType.numberWithOptions(decimal:true), decoration:const InputDecoration(labelText:'Qty',border:OutlineInputBorder()), onChanged:(v)=>setState(()=>item['qty']=v))), IconButton(onPressed:items.length==1?null:()=>setState(()=>items.removeAt(i)), icon:const Icon(Icons.delete_outline,color:Colors.red))]), Align(alignment:Alignment.centerRight, child:Text('Line total: ${money(qty*rate)}',style:const TextStyle(fontWeight:FontWeight.bold))) ])); }),
+      OutlinedButton.icon(onPressed:addItem, icon:const Icon(Icons.add), label:const Text('Add Item')), const Divider(height:28),
+      Align(alignment:Alignment.centerRight, child:Column(crossAxisAlignment:CrossAxisAlignment.end, children:[const Text('SUBTOTAL'), Text(money(total),style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)), const SizedBox(height:4), const Text('TOTAL',style:TextStyle(fontWeight:FontWeight.bold)), Text(money(total),style:const TextStyle(fontSize:23,fontWeight:FontWeight.bold,color:navy))])),
+      const SizedBox(height:14), DropdownButtonFormField<String>(initialValue:status, decoration:const InputDecoration(labelText:'Payment Status',border:OutlineInputBorder()), items:const [DropdownMenuItem(value:'Unpaid',child:Text('Unpaid')),DropdownMenuItem(value:'Paid',child:Text('Paid'))], onChanged:(v){if(v!=null)setState(()=>status=v);}),
+      const SizedBox(height:12), TextField(controller:notes,maxLines:2,decoration:const InputDecoration(labelText:'Notes (optional)',border:OutlineInputBorder())), const SizedBox(height:20), FilledButton.icon(onPressed:saving?null:save, icon:const Icon(Icons.save), label:Text(saving?'Saving...':'Save Invoice')),
+    ]));
+  }
+}
+
+Future<void> exportInvoicePdf(Map<String,dynamic> invoice) async {
+  final doc = pw.Document();
+  final items = (jsonDecode(invoice['items_json'].toString()) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
+  final fmt = NumberFormat.currency(locale:'en_IN',symbol:'₹ ',decimalDigits:2);
+  final total = (invoice['total'] as num).toDouble();
+  doc.addPage(pw.Page(pageFormat:PdfPageFormat.a4, margin:const pw.EdgeInsets.fromLTRB(42,48,42,42), build:(ctx) => pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start, children:[
+    pw.Row(mainAxisAlignment:pw.MainAxisAlignment.spaceBetween, crossAxisAlignment:pw.CrossAxisAlignment.start, children:[pw.Text('INVOICE',style:pw.TextStyle(fontSize:30,fontWeight:pw.FontWeight.bold,letterSpacing:3)),pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.end,children:[pw.Text('INVOICE NO: ${invoice['number']}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:5),pw.Text('DATE: ${dateLabel(invoice['invoice_date'].toString())}'),if((invoice['due_date']??'').toString().isNotEmpty) pw.Text('DUE DATE: ${dateLabel(invoice['due_date'].toString())}')])]),
+    pw.SizedBox(height:65), pw.Text('ISSUED TO:',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,letterSpacing:1)), pw.SizedBox(height:7), pw.Text(invoice['customer'].toString()), if((invoice['phone']??'').toString().isNotEmpty) pw.Text(invoice['phone'].toString()), if((invoice['address']??'').toString().isNotEmpty) pw.Text(invoice['address'].toString()),
+    pw.SizedBox(height:55), pw.Table(border:pw.TableBorder(horizontalInside:pw.BorderSide(color:PdfColors.grey300),top:pw.BorderSide(color:PdfColors.grey700),bottom:pw.BorderSide(color:PdfColors.grey700)), columnWidths:{0:const pw.FlexColumnWidth(4),1:const pw.FlexColumnWidth(1.3),2:const pw.FlexColumnWidth(1),3:const pw.FlexColumnWidth(1.5)}, children:[pw.TableRow(children:['DESCRIPTION','RATE','QTY','TOTAL'].map((v)=>pw.Padding(padding:const pw.EdgeInsets.symmetric(vertical:10),child:pw.Text(v,style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:9)))).toList()), ...items.map((it){final q=double.tryParse(it['qty'].toString())??0;final r=double.tryParse(it['rate'].toString())??0;return pw.TableRow(children:[it['description'].toString(),fmt.format(r),q.toString(),fmt.format(q*r)].map((v)=>pw.Padding(padding:const pw.EdgeInsets.symmetric(vertical:10),child:pw.Text(v,style:const pw.TextStyle(fontSize:9)))).toList());})]),
+    pw.SizedBox(height:15), pw.Align(alignment:pw.Alignment.centerRight,child:pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.end,children:[pw.Text('SUBTOTAL     ${fmt.format(total)}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:8),pw.Text('TOTAL     ${fmt.format(total)}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:15))])),
+    pw.Spacer(), pw.Row(mainAxisAlignment:pw.MainAxisAlignment.spaceBetween, crossAxisAlignment:pw.CrossAxisAlignment.end, children:[pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start,children:[pw.Text('PAYMENT STATUS',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,letterSpacing:1)),pw.SizedBox(height:6),pw.Text(invoice['status'].toString()),if((invoice['notes']??'').toString().isNotEmpty) pw.Text('Notes: ${invoice['notes']}')]),pw.Text(invoice['status']=='Paid'?'PAID':'UNPAID',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:14,color:invoice['status']=='Paid'?PdfColors.green:PdfColors.orange))])
+  ])));
+  await Printing.layoutPdf(onLayout:(format) async => doc.save(), name:'${invoice['number']}.pdf');
 }
