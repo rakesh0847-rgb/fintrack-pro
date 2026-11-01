@@ -156,10 +156,13 @@ class FinanceDatabase {
   }
 
   Future<Map<String, double>> getAllProjectsSummary() async {
+    // Only include transactions linked to projects that still exist.
+    // Transactions from deleted projects remain safely stored but are excluded.
     final rows = await (await database).rawQuery('''SELECT
-      COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) AS income,
-      COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) AS expense
-      FROM transactions WHERE project_id IS NOT NULL''');
+      COALESCE(SUM(CASE WHEN t.type='income' THEN t.amount ELSE 0 END),0) AS income,
+      COALESCE(SUM(CASE WHEN t.type='expense' THEN t.amount ELSE 0 END),0) AS expense
+      FROM transactions t
+      INNER JOIN projects p ON p.id = t.project_id''');
     final income = (rows.first['income'] as num).toDouble();
     final expense = (rows.first['expense'] as num).toDouble();
     return {'income': income, 'expense': expense, 'balance': income - expense};
@@ -360,11 +363,26 @@ class _ReportsPageState extends State<ReportsPage> {
   DateTime from = DateTime(DateTime.now().year, DateTime.now().month, 1);
   DateTime to = DateTime.now();
   String scope = 'All Accounts';
+  String reportPeriod = 'Monthly';
   int? selectedProjectId;
   List<Map<String,dynamic>> projects = [];
   bool exporting = false;
+
+  void setReportPeriod(String period) {
+    final now = DateTime.now();
+    setState(() {
+      reportPeriod = period;
+      if (period == 'Daily') {
+        from = DateTime(now.year, now.month, now.day);
+        to = DateTime(now.year, now.month, now.day);
+      } else if (period == 'Monthly') {
+        from = DateTime(now.year, now.month, 1);
+        to = DateTime(now.year, now.month, now.day);
+      }
+    });
+  }
   @override void initState() { super.initState(); FinanceDatabase.instance.getProjects().then((v) { if (mounted) setState(() => projects = v); }); }
-  Future<void> pick(bool start) async { final d = await showDatePicker(context: context, initialDate: start ? from : to, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() { if (start) { from = d; } else { to = d; } }); }
+  Future<void> pick(bool start) async { final d = await showDatePicker(context: context, initialDate: start ? from : to, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() { reportPeriod = 'Custom Date Range'; if (start) { from = d; } else { to = d; } }); }
 
   Future<void> exportPdf() async {
     setState(() => exporting = true);
@@ -438,7 +456,22 @@ class _ReportsPageState extends State<ReportsPage> {
               onChanged: (v) => setState(() => selectedProjectId = v),
             ),
             const SizedBox(height: 12),
-            Row(children: [Expanded(child: OutlinedButton(onPressed: () => pick(true), child: Text('From: ${DateFormat('dd-MM-yyyy').format(from)}'))), const SizedBox(width: 8), Expanded(child: OutlinedButton(onPressed: () => pick(false), child: Text('To: ${DateFormat('dd-MM-yyyy').format(to)}')))]),
+            DropdownButtonFormField<String>(
+              initialValue: reportPeriod,
+              decoration: const InputDecoration(labelText: 'Report Period', border: OutlineInputBorder()),
+              items: const [
+                DropdownMenuItem(value: 'Daily', child: Text('Daily')),
+                DropdownMenuItem(value: 'Monthly', child: Text('Monthly')),
+                DropdownMenuItem(value: 'Custom Date Range', child: Text('Custom Date Range')),
+              ],
+              onChanged: (v) { if (v != null) setReportPeriod(v); },
+            ),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: OutlinedButton(onPressed: reportPeriod == 'Custom Date Range' ? () => pick(true) : null, child: Text('From: ${DateFormat('dd-MM-yyyy').format(from)}'))),
+              const SizedBox(width: 8),
+              Expanded(child: OutlinedButton(onPressed: reportPeriod == 'Custom Date Range' ? () => pick(false) : null, child: Text('To: ${DateFormat('dd-MM-yyyy').format(to)}'))),
+            ]),
             const SizedBox(height: 16),
             _reportTile('Total Income', d['income']!, green, Icons.trending_up),
             _reportTile('Total Expense', d['expense']!, Colors.red, Icons.trending_down),
