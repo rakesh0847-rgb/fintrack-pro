@@ -3,6 +3,8 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
 import 'package:flutter/foundation.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,7 +24,7 @@ String t(String en) {
 const Map<String, String> _ml = {
   'Welcome!':'സ്വാഗതം!', 'Your financial overview':'നിങ്ങളുടെ സാമ്പത്തിക വിവരങ്ങൾ',
   'Manage Accounts':'അക്കൗണ്ടുകൾ', 'Personal':'വ്യക്തിഗതം', 'Family':'കുടുംബം', 'Business':'ബിസിനസ്',
-  'Personal income and expenses':'വ്യക്തിഗത വരവും ചെലവും', 'Family income and expenses':'കുടുംബ വരവും ചെലവും', 'Business and project accounts':'ബിസിനസ്, പ്രോജക്റ്റ് അക്കൗണ്ടുകൾ',
+  'Personal income and expenses':'വ്യക്തിഗത വരവും ചെലവും', 'Family income and expenses':'കുടുംബ വരവും ചെലവും', 'Business income and expenses only':'ബിസിനസിലെ മറ്റ് വരവും ചെലവും മാത്രം', 'Projects Balance':'പ്രോജക്റ്റുകളുടെ അറ്റ ബാലൻസ്',
   'Quick Access':'വേഗത്തിലുള്ള പ്രവർത്തനങ്ങൾ', 'Add Income':'വരവ് ചേർക്കുക', 'Add Expense':'ചെലവ് ചേർക്കുക',
   'Reports':'റിപ്പോർട്ടുകൾ', 'Projects':'പ്രോജക്റ്റുകൾ', 'Financial Reports':'സാമ്പത്തിക റിപ്പോർട്ടുകൾ',
   'Amount':'തുക', 'Description / Notes':'വിവരണം', 'Date':'തീയതി', 'Save Transaction':'ഇടപാട് സേവ് ചെയ്യുക',
@@ -104,11 +106,12 @@ class FinanceDatabase {
   Future<int> deleteTransaction(int id) async =>
       (await database).delete('transactions', where: 'id = ?', whereArgs: [id]);
 
-  Future<List<Map<String, dynamic>>> getTransactions({String? scope, DateTime? from, DateTime? to, int? projectId}) async {
+  Future<List<Map<String, dynamic>>> getTransactions({String? scope, DateTime? from, DateTime? to, int? projectId, bool excludeProjectTransactions = true}) async {
     final clauses = <String>[];
     final args = <Object?>[];
     if (scope != null) { clauses.add('t.scope = ?'); args.add(scope); }
     if (projectId != null) { clauses.add('t.project_id = ?'); args.add(projectId); }
+    else if (excludeProjectTransactions) { clauses.add('t.project_id IS NULL'); }
     if (from != null) { clauses.add('t.date >= ?'); args.add(DateTime(from.year, from.month, from.day).toIso8601String()); }
     if (to != null) { clauses.add('t.date < ?'); args.add(DateTime(to.year, to.month, to.day).add(const Duration(days: 1)).toIso8601String()); }
     return (await database).rawQuery('''
@@ -120,12 +123,13 @@ class FinanceDatabase {
     ''', args);
   }
 
-  Future<Map<String, double>> getSummary({String? scope, DateTime? from, DateTime? to, int? projectId}) async {
+  Future<Map<String, double>> getSummary({String? scope, DateTime? from, DateTime? to, int? projectId, bool excludeProjectTransactions = true}) async {
     final db = await database;
     final clauses = <String>[];
     final args = <Object?>[];
     if (scope != null) { clauses.add('scope = ?'); args.add(scope); }
     if (projectId != null) { clauses.add('project_id = ?'); args.add(projectId); }
+    else if (excludeProjectTransactions) { clauses.add('project_id IS NULL'); }
     if (from != null) { clauses.add('date >= ?'); args.add(DateTime(from.year, from.month, from.day).toIso8601String()); }
     if (to != null) { clauses.add('date < ?'); args.add(DateTime(to.year, to.month, to.day).add(const Duration(days: 1)).toIso8601String()); }
     final rows = await db.rawQuery('''SELECT
@@ -145,6 +149,16 @@ class FinanceDatabase {
         COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) AS expense
       FROM transactions WHERE project_id = ?
     ''', [projectId]);
+    final income = (rows.first['income'] as num).toDouble();
+    final expense = (rows.first['expense'] as num).toDouble();
+    return {'income': income, 'expense': expense, 'balance': income - expense};
+  }
+
+  Future<Map<String, double>> getAllProjectsSummary() async {
+    final rows = await (await database).rawQuery('''SELECT
+      COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) AS income,
+      COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) AS expense
+      FROM transactions WHERE project_id IS NOT NULL''');
     final income = (rows.first['income'] as num).toDouble();
     final expense = (rows.first['expense'] as num).toDouble();
     return {'income': income, 'expense': expense, 'balance': income - expense};
@@ -191,7 +205,7 @@ class _HomePageState extends State<HomePage> {
   final accounts = const [
     ('Personal', 'Personal income and expenses', Icons.person, Colors.blue),
     ('Family', 'Family income and expenses', Icons.groups, Colors.orange),
-    ('Business', 'Business and project accounts', Icons.business, green),
+    ('Business', 'Business income and expenses only', Icons.business, green),
   ];
   Future<void> openAccount(String name) async { await Navigator.push(context, MaterialPageRoute(builder: (_) => AccountPage(scope: name))); if (mounted) setState(() {}); }
   Future<void> quickEntry(String type) async {
@@ -209,6 +223,7 @@ class _HomePageState extends State<HomePage> {
         const SizedBox(height: 4), Text(t('Your financial overview'), style: TextStyle(color: Colors.grey.shade600)),
         const SizedBox(height: 16),
         ...accounts.map((a) => FutureBuilder<Map<String,double>>(future: db.getSummary(scope: a.$1), builder: (context, balance) { final amount = balance.data?['balance'] ?? 0.0; return Card(child: ListTile(leading: Icon(a.$3, color: a.$4), title: Text(t('${a.$1} Balance')), trailing: Text(money(amount), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)))); })),
+        FutureBuilder<Map<String,double>>(future: db.getAllProjectsSummary(), builder: (context, balance) { final amount = balance.data?['balance'] ?? 0.0; return Card(child: ListTile(leading: const Icon(Icons.folder, color: Colors.deepOrange), title: Text(t('Projects Balance')), trailing: Text(money(amount), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)))); }),
         const SizedBox(height: 24), Text(t('Manage Accounts'), style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 10),
         ...accounts.map((a) => Card(child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7), leading: CircleAvatar(backgroundColor: a.$4.withValues(alpha: .12), child: Icon(a.$3, color: a.$4)), title: Text(t(a.$1), style: const TextStyle(fontWeight: FontWeight.bold)), subtitle: Text(t(a.$2)), trailing: const Icon(Icons.chevron_right), onTap: () => openAccount(a.$1)))),
         const SizedBox(height: 14), Text(t('Quick Access'), style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 10),
@@ -346,57 +361,103 @@ class _ReportsPageState extends State<ReportsPage> {
   String scope = 'All Accounts';
   int? selectedProjectId;
   List<Map<String,dynamic>> projects = [];
+  bool exporting = false;
   @override void initState() { super.initState(); FinanceDatabase.instance.getProjects().then((v) { if (mounted) setState(() => projects = v); }); }
   Future<void> pick(bool start) async { final d = await showDatePicker(context: context, initialDate: start ? from : to, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() { if (start) { from = d; } else { to = d; } }); }
+
+  Future<void> exportPdf() async {
+    setState(() => exporting = true);
+    try {
+      final project = selectedProjectId == null ? null : projects.firstWhere((p) => p['id'] == selectedProjectId);
+      final reportTitle = project == null ? '$scope Financial Report' : '${project['name']} Project Report';
+      final reportScope = project == null && scope != 'All Accounts' ? scope : null;
+      final summary = await FinanceDatabase.instance.getSummary(scope: reportScope, projectId: selectedProjectId, from: from, to: to);
+      final rows = await FinanceDatabase.instance.getTransactions(scope: reportScope, projectId: selectedProjectId, from: from, to: to);
+      final doc = pw.Document();
+      doc.addPage(pw.MultiPage(build: (context) => [
+        pw.Text('FinTrack Pro', style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5), pw.Text(reportTitle, style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+        pw.Text('Period: ${DateFormat('dd-MM-yyyy').format(from)} to ${DateFormat('dd-MM-yyyy').format(to)}'),
+        pw.SizedBox(height: 16),
+        pw.Table(border: pw.TableBorder.all(color: PdfColors.grey400), children: [
+          _pdfRow('Total Income', money(summary['income'])),
+          _pdfRow('Total Expense', money(summary['expense'])),
+          _pdfRow('Net Balance', money(summary['balance'])),
+        ]),
+        pw.SizedBox(height: 18),
+        pw.Text('Transactions', style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 8),
+        if (rows.isEmpty) pw.Text('No transactions in selected period.') else pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey400),
+          columnWidths: {0: const pw.FlexColumnWidth(1.2), 1: const pw.FlexColumnWidth(1.1), 2: const pw.FlexColumnWidth(2.2), 3: const pw.FlexColumnWidth(1.2)},
+          children: [
+            pw.TableRow(decoration: const pw.BoxDecoration(color: PdfColors.grey200), children: ['Date','Type','Description','Amount'].map((v) => pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text(v, style: pw.TextStyle(fontWeight: pw.FontWeight.bold)))).toList()),
+            ...rows.map((r) => pw.TableRow(children: [
+              r['date'] == null ? '-' : dateLabel(r['date'].toString()),
+              r['type'].toString().toUpperCase(),
+              (r['note'] ?? r['category'] ?? '').toString(),
+              '${r['type'] == 'income' ? '+' : '-'}${money(r['amount'] as num)}',
+            ].map((v) => pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text(v))).toList())),
+          ],
+        ),
+      ]));
+      final bytes = await doc.save();
+      await Printing.sharePdf(bytes: bytes, filename: 'FinTrack_${project == null ? scope.replaceAll(' ', '_') : (project['name'] as String).replaceAll(' ', '_')}_Report.pdf');
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF export failed: $e')));
+    } finally { if (mounted) setState(() => exporting = false); }
+  }
+
+  pw.TableRow _pdfRow(String label, String value) => pw.TableRow(children: [
+    pw.Padding(padding: const pw.EdgeInsets.all(7), child: pw.Text(label)),
+    pw.Padding(padding: const pw.EdgeInsets.all(7), child: pw.Text(value, textAlign: pw.TextAlign.right)),
+  ]);
+
   @override
   Widget build(BuildContext context) {
-    final selectedScope = scope == 'All Accounts' ? null : scope;
+    final selectedScope = selectedProjectId == null && scope != 'All Accounts' ? scope : null;
     return Scaffold(
       appBar: AppBar(title: Text(t('Financial Reports'))),
       body: FutureBuilder<Map<String, double>>(
-        future: FinanceDatabase.instance.getSummary(scope: selectedProjectId == null ? selectedScope : null, projectId: selectedProjectId, from: from, to: to),
+        future: FinanceDatabase.instance.getSummary(scope: selectedScope, projectId: selectedProjectId, from: from, to: to),
         builder: (context, snap) {
           final d = snap.data ?? {'income': 0.0, 'expense': 0.0, 'balance': 0.0};
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              DropdownButtonFormField<String>(
-                initialValue: scope,
-                decoration: const InputDecoration(labelText: 'Account', border: OutlineInputBorder()),
-                items: ['All Accounts', 'Personal', 'Family', 'Business'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-                onChanged: (v) => setState(() => scope = v ?? 'All Accounts'),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<int?>(initialValue: selectedProjectId, decoration: InputDecoration(labelText: t('Project Report (optional)'), border: const OutlineInputBorder()), items: [const DropdownMenuItem<int?>(value: null, child: Text('All Projects / Accounts')), ...projects.map((p) => DropdownMenuItem<int?>(value: p['id'] as int, child: Text(p['name'] as String)))], onChanged: (v) => setState(() => selectedProjectId = v)),
-              const SizedBox(height: 12),
-              Row(children: [
-                Expanded(child: OutlinedButton(onPressed: () => pick(true), child: Text('From: ${DateFormat('dd-MM-yyyy').format(from)}'))),
-                const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: () => pick(false), child: Text('To: ${DateFormat('dd-MM-yyyy').format(to)}'))),
-              ]),
-              const SizedBox(height: 16),
-              _reportTile('Total Income', d['income']!, green, Icons.trending_up),
-              _reportTile('Total Expense', d['expense']!, Colors.red, Icons.trending_down),
-              _reportTile('Net Balance', d['balance']!, navy, Icons.account_balance_wallet),
-              const SizedBox(height: 18),
-              Text(t('Transactions in selected period'), style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              FutureBuilder<List<Map<String, dynamic>>>(
-                future: FinanceDatabase.instance.getTransactions(scope: selectedProjectId == null ? selectedScope : null, projectId: selectedProjectId, from: from, to: to),
-                builder: (context, rows) {
-                  if (!rows.hasData) return const Center(child: CircularProgressIndicator());
-                  if (rows.data!.isEmpty) return Padding(padding: const EdgeInsets.all(20), child: Text(t('No transactions for this period.')));
-                  return Column(children: rows.data!.map((r) {
-                    final inc = r['type'] == 'income';
-                    return Card(child: ListTile(
-                      title: Text('${r['scope']} • ${(r['project_name'] ?? r['category']).toString()}'),
-                      subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)}'),
-                      trailing: Text('${inc ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: inc ? green : Colors.red, fontWeight: FontWeight.bold)),
-                    ));
-                  }).toList());
-                },
-              ),
-            ],
-          );
+          return ListView(padding: const EdgeInsets.all(16), children: [
+            DropdownButtonFormField<String>(
+              initialValue: scope,
+              decoration: const InputDecoration(labelText: 'Account', border: OutlineInputBorder()),
+              items: ['All Accounts', 'Personal', 'Family', 'Business'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+              onChanged: (v) => setState(() { scope = v ?? 'All Accounts'; selectedProjectId = null; }),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int?>(
+              initialValue: selectedProjectId,
+              decoration: InputDecoration(labelText: t('Project Report (optional)'), border: const OutlineInputBorder()),
+              items: [const DropdownMenuItem<int?>(value: null, child: Text('No Project / Account Report')), ...projects.map((p) => DropdownMenuItem<int?>(value: p['id'] as int, child: Text(p['name'] as String)))],
+              onChanged: (v) => setState(() => selectedProjectId = v),
+            ),
+            const SizedBox(height: 12),
+            Row(children: [Expanded(child: OutlinedButton(onPressed: () => pick(true), child: Text('From: ${DateFormat('dd-MM-yyyy').format(from)}'))), const SizedBox(width: 8), Expanded(child: OutlinedButton(onPressed: () => pick(false), child: Text('To: ${DateFormat('dd-MM-yyyy').format(to)}')))]),
+            const SizedBox(height: 16),
+            _reportTile('Total Income', d['income']!, green, Icons.trending_up),
+            _reportTile('Total Expense', d['expense']!, Colors.red, Icons.trending_down),
+            _reportTile('Net Balance', d['balance']!, navy, Icons.account_balance_wallet),
+            const SizedBox(height: 12),
+            FilledButton.icon(onPressed: exporting ? null : exportPdf, icon: const Icon(Icons.picture_as_pdf), label: Text(exporting ? 'Preparing PDF...' : 'Export PDF')),
+            const SizedBox(height: 18),
+            Text(t('Transactions in selected period'), style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: FinanceDatabase.instance.getTransactions(scope: selectedScope, projectId: selectedProjectId, from: from, to: to),
+              builder: (context, rows) {
+                if (!rows.hasData) return const Center(child: CircularProgressIndicator());
+                if (rows.data!.isEmpty) return Padding(padding: const EdgeInsets.all(20), child: Text(t('No transactions for this period.')));
+                return Column(children: rows.data!.map((r) {
+                  final inc = r['type'] == 'income';
+                  return Card(child: ListTile(title: Text('${r['scope']} • ${(r['project_name'] ?? r['category']).toString()}'), subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)} • ${(r['note'] ?? '').toString()}'), trailing: Text('${inc ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: inc ? green : Colors.red, fontWeight: FontWeight.bold))));
+                }).toList());
+              },
+            ),
+          ]);
         },
       ),
     );
