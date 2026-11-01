@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:flutter/foundation.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:pdf/pdf.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
