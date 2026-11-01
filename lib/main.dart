@@ -156,13 +156,10 @@ class FinanceDatabase {
   }
 
   Future<Map<String, double>> getAllProjectsSummary() async {
-    // Only include transactions linked to projects that still exist.
-    // Transactions from deleted projects remain safely stored but are excluded.
     final rows = await (await database).rawQuery('''SELECT
-      COALESCE(SUM(CASE WHEN t.type='income' THEN t.amount ELSE 0 END),0) AS income,
-      COALESCE(SUM(CASE WHEN t.type='expense' THEN t.amount ELSE 0 END),0) AS expense
-      FROM transactions t
-      INNER JOIN projects p ON p.id = t.project_id''');
+      COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) AS income,
+      COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) AS expense
+      FROM transactions WHERE project_id IS NOT NULL''');
     final income = (rows.first['income'] as num).toDouble();
     final expense = (rows.first['expense'] as num).toDouble();
     return {'income': income, 'expense': expense, 'balance': income - expense};
@@ -220,11 +217,10 @@ class _HomePageState extends State<HomePage> {
   }
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('FinTrack Pro', style: TextStyle(fontWeight: FontWeight.bold)), actions: [IconButton(tooltip: 'Reports', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsPage())), icon: const Icon(Icons.analytics_outlined)), IconButton(tooltip: 'Projects', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProjectsPage())), icon: const Icon(Icons.folder_open)), PopupMenuButton<String>(tooltip: 'Language', onSelected: (v) async { appLanguage.value = v; await db.setSetting('language', v); if (mounted) setState(() {}); }, itemBuilder: (_) => [PopupMenuItem(value: 'en', child: Text(t('English'))), PopupMenuItem(value: 'ml', child: Text(t('Malayalam')))], icon: const Icon(Icons.language))]),
+    appBar: AppBar(title: Row(children: [ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.asset('assets/fintrack_logo.png', width: 38, height: 38, fit: BoxFit.cover)), const SizedBox(width: 9), const Text('FinTrack Pro', style: TextStyle(fontWeight: FontWeight.bold))]), actions: [IconButton(tooltip: 'Reports', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsPage())), icon: const Icon(Icons.analytics_outlined)), IconButton(tooltip: 'Projects', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProjectsPage())), icon: const Icon(Icons.folder_open)), PopupMenuButton<String>(tooltip: 'Language', onSelected: (v) async { appLanguage.value = v; await db.setSetting('language', v); if (mounted) setState(() {}); }, itemBuilder: (_) => [PopupMenuItem(value: 'en', child: Text(t('English'))), PopupMenuItem(value: 'ml', child: Text(t('Malayalam')))], icon: const Icon(Icons.language))]),
     body: Builder(builder: (context) {
       return ListView(padding: const EdgeInsets.all(16), children: [
-        Text(t('Welcome!'), style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 4), Text(t('Your financial overview'), style: TextStyle(color: Colors.grey.shade600)),
+        Row(children: [ClipRRect(borderRadius: BorderRadius.circular(14), child: Image.asset('assets/fintrack_logo.png', width: 76, height: 76, fit: BoxFit.cover)), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(t('Welcome!'), style: const TextStyle(fontSize: 25, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(t('Your financial overview'), style: TextStyle(color: Colors.grey.shade600))]))]),
         const SizedBox(height: 16),
         ...accounts.map((a) => FutureBuilder<Map<String,double>>(future: db.getSummary(scope: a.$1), builder: (context, balance) { final amount = balance.data?['balance'] ?? 0.0; return Card(child: ListTile(leading: Icon(a.$3, color: a.$4), title: Text(t('${a.$1} Balance')), trailing: Text(money(amount), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)))); })),
         FutureBuilder<Map<String,double>>(future: db.getAllProjectsSummary(), builder: (context, balance) { final amount = balance.data?['balance'] ?? 0.0; return Card(child: ListTile(leading: const Icon(Icons.folder, color: Colors.deepOrange), title: Text(t('Projects Balance')), trailing: Text(money(amount), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)))); }),
@@ -363,26 +359,11 @@ class _ReportsPageState extends State<ReportsPage> {
   DateTime from = DateTime(DateTime.now().year, DateTime.now().month, 1);
   DateTime to = DateTime.now();
   String scope = 'All Accounts';
-  String reportPeriod = 'Monthly';
   int? selectedProjectId;
   List<Map<String,dynamic>> projects = [];
   bool exporting = false;
-
-  void setReportPeriod(String period) {
-    final now = DateTime.now();
-    setState(() {
-      reportPeriod = period;
-      if (period == 'Daily') {
-        from = DateTime(now.year, now.month, now.day);
-        to = DateTime(now.year, now.month, now.day);
-      } else if (period == 'Monthly') {
-        from = DateTime(now.year, now.month, 1);
-        to = DateTime(now.year, now.month, now.day);
-      }
-    });
-  }
   @override void initState() { super.initState(); FinanceDatabase.instance.getProjects().then((v) { if (mounted) setState(() => projects = v); }); }
-  Future<void> pick(bool start) async { final d = await showDatePicker(context: context, initialDate: start ? from : to, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() { reportPeriod = 'Custom Date Range'; if (start) { from = d; } else { to = d; } }); }
+  Future<void> pick(bool start) async { final d = await showDatePicker(context: context, initialDate: start ? from : to, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() { if (start) { from = d; } else { to = d; } }); }
 
   Future<void> exportPdf() async {
     setState(() => exporting = true);
@@ -456,22 +437,7 @@ class _ReportsPageState extends State<ReportsPage> {
               onChanged: (v) => setState(() => selectedProjectId = v),
             ),
             const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: reportPeriod,
-              decoration: const InputDecoration(labelText: 'Report Period', border: OutlineInputBorder()),
-              items: const [
-                DropdownMenuItem(value: 'Daily', child: Text('Daily')),
-                DropdownMenuItem(value: 'Monthly', child: Text('Monthly')),
-                DropdownMenuItem(value: 'Custom Date Range', child: Text('Custom Date Range')),
-              ],
-              onChanged: (v) { if (v != null) setReportPeriod(v); },
-            ),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(child: OutlinedButton(onPressed: reportPeriod == 'Custom Date Range' ? () => pick(true) : null, child: Text('From: ${DateFormat('dd-MM-yyyy').format(from)}'))),
-              const SizedBox(width: 8),
-              Expanded(child: OutlinedButton(onPressed: reportPeriod == 'Custom Date Range' ? () => pick(false) : null, child: Text('To: ${DateFormat('dd-MM-yyyy').format(to)}'))),
-            ]),
+            Row(children: [Expanded(child: OutlinedButton(onPressed: () => pick(true), child: Text('From: ${DateFormat('dd-MM-yyyy').format(from)}'))), const SizedBox(width: 8), Expanded(child: OutlinedButton(onPressed: () => pick(false), child: Text('To: ${DateFormat('dd-MM-yyyy').format(to)}')))]),
             const SizedBox(height: 16),
             _reportTile('Total Income', d['income']!, green, Icons.trending_up),
             _reportTile('Total Expense', d['expense']!, Colors.red, Icons.trending_down),
