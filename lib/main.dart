@@ -47,12 +47,7 @@ const Map<String, String> _ml = {
   'Salary':'ശമ്പളം', 'Sales':'വിൽപ്പന', 'Service':'സേവനം', 'Interest':'പലിശ', 'Food':'ഭക്ഷണം',
   'Travel':'യാത്ര', 'Rent':'വാടക', 'Materials':'സാധനങ്ങൾ', 'Bills':'ബില്ലുകൾ', 'Other':'മറ്റുള്ളവ',
   'Business Account':'ബിസിനസ് അക്കൗണ്ട്', 'Personal Account':'വ്യക്തിഗത അക്കൗണ്ട്', 'Family Account':'കുടുംബ അക്കൗണ്ട്',
-  'Add Project':'പ്രോജക്റ്റ് ചേർക്കുക', 'Customer / Client':'ഉപഭോക്താവ്', 'No projects yet. Tap Add Project to begin.':'പ്രോജക്റ്റുകളില്ല. ആരംഭിക്കാൻ പ്രോജക്റ്റ് ചേർക്കുക.',
   'Transactions linked to this project will remain in the database.':'ഈ പ്രോജക്റ്റുമായി ബന്ധിപ്പിച്ച ഇടപാടുകൾ ഡാറ്റാബേസിൽ തുടരും.',
-  'Project Report (optional)':'പ്രോജക്റ്റ് റിപ്പോർട്ട് (ഐച്ഛികം)', 'All Projects / Accounts':'എല്ലാ പ്രോജക്റ്റുകളും അക്കൗണ്ടുകളും',
-  'Edit / Delete':'തിരുത്തുക / ഡിലീറ്റ്', 'Language':'ഭാഷ', 'English':'ഇംഗ്ലീഷ്', 'Malayalam':'മലയാളം',
-  'Select account':'അക്കൗണ്ട് തിരഞ്ഞെടുക്കുക', 'Welcome!':'സ്വാഗതം!', 'Current Balance':'നിലവിലെ ബാലൻസ്',
-  'Delete':'ഡിലീറ്റ്', 'Transactions linked to this project will remain in the database.':'ഈ പ്രോജക്റ്റുമായി ബന്ധിപ്പിച്ച ഇടപാടുകൾ ഡാറ്റാബേസിൽ തുടരും.',
 };
 
 class FinanceDatabase {
