@@ -32,6 +32,9 @@ jobs:
 
       - name: Get dependencies
         run: flutter pub get
+        
+      - name: Generate App Icons
+        run: dart run flutter_launcher_icons
      
       - name: Remove default test
         run: rm -rf test
