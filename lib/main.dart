@@ -65,7 +65,7 @@ class FinanceDatabase {
     final dbFile = p.join(dbPath, 'fintrack_pro.db');
     _database = await openDatabase(
       dbFile,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,7 +75,8 @@ class FinanceDatabase {
           category TEXT NOT NULL,
           note TEXT,
           date TEXT NOT NULL,
-          project_id INTEGER
+          project_id INTEGER,
+          payment_mode TEXT
         )''');
         await db.execute('''CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)''');
         await db.execute('''CREATE TABLE projects (
@@ -94,6 +95,7 @@ class FinanceDatabase {
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) { await db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'); }
         if (oldVersion < 3) { await db.execute('''CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT NOT NULL UNIQUE, customer TEXT NOT NULL, phone TEXT, address TEXT, invoice_date TEXT NOT NULL, due_date TEXT, items_json TEXT NOT NULL, subtotal REAL NOT NULL, total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Unpaid', notes TEXT)'''); }
+        if (oldVersion < 4) { await db.execute('ALTER TABLE transactions ADD COLUMN payment_mode TEXT'); }
       },
     );
     return _database!;
@@ -148,6 +150,17 @@ class FinanceDatabase {
     final income = (row['income'] as num).toDouble();
     final expense = (row['expense'] as num).toDouble();
     return {'income': income, 'expense': expense, 'balance': income - expense};
+  }
+
+  Future<Map<String, double>> getIncomeByPaymentMode({String? scope, DateTime? from, DateTime? to, int? projectId}) async {
+    final clauses = <String>["type = 'income'"];
+    final args = <Object?>[];
+    if (scope != null) { clauses.add('scope = ?'); args.add(scope); }
+    if (projectId != null) { clauses.add('project_id = ?'); args.add(projectId); }
+    if (from != null) { clauses.add('date >= ?'); args.add(DateTime(from.year, from.month, from.day).toIso8601String()); }
+    if (to != null) { clauses.add('date < ?'); args.add(DateTime(to.year, to.month, to.day).add(const Duration(days: 1)).toIso8601String()); }
+    final rows = await (await database).rawQuery("""SELECT COALESCE(payment_mode, 'Not specified') AS mode, COALESCE(SUM(amount),0) AS total FROM transactions WHERE ${clauses.join(' AND ')} GROUP BY payment_mode ORDER BY total DESC""", args);
+    return {for (final row in rows) row['mode'].toString(): (row['total'] as num).toDouble()};
   }
 
   Future<Map<String, double>> getProjectSummary(int projectId) async {
@@ -321,7 +334,7 @@ class _AccountPageState extends State<AccountPage> {
                     return Card(child: ListTile(
                       leading: CircleAvatar(backgroundColor: (income ? green : Colors.red).withValues(alpha: .1), child: Icon(income ? Icons.south_west : Icons.north_east, color: income ? green : Colors.red)),
                       title: Text((r['project_name'] ?? r['category']).toString(), style: const TextStyle(fontWeight: FontWeight.w600)),
-                      subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)}${(r['note'] ?? '').toString().isEmpty ? '' : ' • ${r['note']}'}'),
+                      subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)}${income && (r['payment_mode'] ?? '').toString().isNotEmpty ? ' • ${r['payment_mode']}' : ''}${(r['note'] ?? '').toString().isEmpty ? '' : ' • ${r['note']}'}'),
                       trailing: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.end, children: [
                         Text('${income ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: income ? green : Colors.red, fontWeight: FontWeight.bold)),
                         const SizedBox(height: 3),
@@ -356,24 +369,26 @@ class _EntryPageState extends State<EntryPage> {
   String category = 'Other';
   int? projectId;
   bool saving = false;
+  String paymentMode = 'Cash';
+  final paymentModes = const ['Cash', 'UPI', 'Bank Transfer', 'Card', 'Cheque', 'Other'];
   final incomeCategories = const ['Salary','Sales','Service','Interest','Other'];
   final expenseCategories = const ['Food','Travel','Rent','Salary','Materials','Bills','Other'];
   bool get isIncome => widget.type == 'income';
   bool get projectMode => widget.initialProjectId != null || (widget.record?['project_id'] != null);
   @override
-  void initState() { super.initState(); projectId = widget.initialProjectId; final r = widget.record; if (r != null) { amount.text = (r['amount'] as num).toString(); note.text = (r['note'] ?? '').toString(); category = r['category'] as String; selectedDate = DateTime.tryParse(r['date'] as String) ?? DateTime.now(); projectId = r['project_id'] as int?; } }
+  void initState() { super.initState(); projectId = widget.initialProjectId; final r = widget.record; if (r != null) { amount.text = (r['amount'] as num).toString(); note.text = (r['note'] ?? '').toString(); category = r['category'] as String; selectedDate = DateTime.tryParse(r['date'] as String) ?? DateTime.now(); projectId = r['project_id'] as int?; paymentMode = (r['payment_mode'] ?? 'Cash').toString(); } }
   @override
   void dispose() { amount.dispose(); note.dispose(); super.dispose(); }
   Future<void> save() async {
     final value = double.tryParse(amount.text.trim());
     if (value == null || value <= 0) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t('Enter a valid amount')))); return; }
     setState(() => saving = true);
-    final data = {'scope': widget.scope, 'type': widget.type, 'amount': value, 'category': projectMode ? category : 'Other', 'note': note.text.trim(), 'date': selectedDate.toIso8601String(), 'project_id': projectMode ? projectId : null};
+    final data = {'scope': widget.scope, 'type': widget.type, 'amount': value, 'category': projectMode ? category : 'Other', 'note': note.text.trim(), 'date': selectedDate.toIso8601String(), 'project_id': projectMode ? projectId : null, 'payment_mode': isIncome ? paymentMode : null};
     try { if (widget.record == null) { await FinanceDatabase.instance.addTransaction(data); } else { await FinanceDatabase.instance.updateTransaction(widget.record!['id'] as int, data); } if (mounted) Navigator.pop(context,true); }
     catch (e) { if (mounted) { setState(() => saving = false); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e'))); } }
   }
   @override
-  Widget build(BuildContext context) { final cats = isIncome ? incomeCategories : expenseCategories; return Scaffold(appBar: AppBar(title: Text(t(widget.record == null ? (isIncome ? 'Add Income' : 'Add Expense') : 'Edit Transaction'))), body: ListView(padding: const EdgeInsets.all(18), children: [Text('${t(widget.scope)} Account', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), const SizedBox(height: 18), TextField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: t('Amount'), prefixText: '₹ ', border: const OutlineInputBorder())), const SizedBox(height: 14), if (projectMode) ...[DropdownButtonFormField<String>(initialValue: cats.contains(category) ? category : 'Other', decoration: InputDecoration(labelText: t('Category'), border: const OutlineInputBorder()), items: cats.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(), onChanged: (v) { if (v != null) setState(() => category = v); }), const SizedBox(height: 14)], TextField(controller: note, maxLines: 2, decoration: InputDecoration(labelText: t('Description / Notes'), border: const OutlineInputBorder())), const SizedBox(height: 14), OutlinedButton.icon(onPressed: () async { final d = await showDatePicker(context: context, initialDate: selectedDate, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() => selectedDate = d); }, icon: const Icon(Icons.calendar_month), label: Text('${t('Date')}: ${DateFormat('dd-MM-yyyy').format(selectedDate)}')), const SizedBox(height: 22), FilledButton.icon(onPressed: saving ? null : save, icon: const Icon(Icons.save), label: Text(saving ? t('Saving...') : t('Save Transaction')))])); }
+  Widget build(BuildContext context) { final cats = isIncome ? incomeCategories : expenseCategories; return Scaffold(appBar: AppBar(title: Text(t(widget.record == null ? (isIncome ? 'Add Income' : 'Add Expense') : 'Edit Transaction'))), body: ListView(padding: const EdgeInsets.all(18), children: [Text('${t(widget.scope)} Account', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), const SizedBox(height: 18), TextField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: InputDecoration(labelText: t('Amount'), prefixText: '₹ ', border: const OutlineInputBorder())), const SizedBox(height: 14), if (isIncome) ...[DropdownButtonFormField<String>(value: paymentModes.contains(paymentMode) ? paymentMode : 'Cash', decoration: const InputDecoration(labelText: 'Payment Mode', border: OutlineInputBorder()), items: paymentModes.map((mode) => DropdownMenuItem(value: mode, child: Text(mode))).toList(), onChanged: (value) { if (value != null) setState(() => paymentMode = value); }), const SizedBox(height: 14)], if (projectMode) ...[DropdownButtonFormField<String>(initialValue: cats.contains(category) ? category : 'Other', decoration: InputDecoration(labelText: t('Category'), border: const OutlineInputBorder()), items: cats.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(), onChanged: (v) { if (v != null) setState(() => category = v); }), const SizedBox(height: 14)], TextField(controller: note, maxLines: 2, decoration: InputDecoration(labelText: t('Description / Notes'), border: const OutlineInputBorder())), const SizedBox(height: 14), OutlinedButton.icon(onPressed: () async { final d = await showDatePicker(context: context, initialDate: selectedDate, firstDate: DateTime(2000), lastDate: DateTime(2100)); if (d != null) setState(() => selectedDate = d); }, icon: const Icon(Icons.calendar_month), label: Text('${t('Date')}: ${DateFormat('dd-MM-yyyy').format(selectedDate)}')), const SizedBox(height: 22), FilledButton.icon(onPressed: saving ? null : save, icon: const Icon(Icons.save), label: Text(saving ? t('Saving...') : t('Save Transaction')))])); }
 }
 
 class ReportsPage extends StatefulWidget { const ReportsPage({super.key}); @override State<ReportsPage> createState() => _ReportsPageState(); }
@@ -465,6 +480,18 @@ class _ReportsPageState extends State<ReportsPage> {
             _reportTile('Total Expense', d['expense']!, Colors.red, Icons.trending_down),
             _reportTile('Net Balance', d['balance']!, navy, Icons.account_balance_wallet),
             const SizedBox(height: 12),
+            FutureBuilder<Map<String, double>>(
+              future: FinanceDatabase.instance.getIncomeByPaymentMode(scope: selectedScope, projectId: selectedProjectId, from: from, to: to),
+              builder: (context, modes) {
+                if (!modes.hasData || modes.data!.isEmpty) return const SizedBox.shrink();
+                return Card(child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Income by Payment Mode', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  ...modes.data!.entries.map((entry) => Padding(padding: const EdgeInsets.symmetric(vertical: 3), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(entry.key), Text(money(entry.value), style: const TextStyle(fontWeight: FontWeight.w600))]))),
+                ])));
+              },
+            ),
+            const SizedBox(height: 12),
             FilledButton.icon(onPressed: exporting ? null : exportPdf, icon: const Icon(Icons.picture_as_pdf), label: Text(exporting ? 'Preparing PDF...' : 'Export PDF')),
             const SizedBox(height: 18),
             Text(t('Transactions in selected period'), style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -475,7 +502,7 @@ class _ReportsPageState extends State<ReportsPage> {
                 if (rows.data!.isEmpty) return Padding(padding: const EdgeInsets.all(20), child: Text(t('No transactions for this period.')));
                 return Column(children: rows.data!.map((r) {
                   final inc = r['type'] == 'income';
-                  return Card(child: ListTile(title: Text('${r['scope']} • ${(r['project_name'] ?? r['category']).toString()}'), subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)} • ${(r['note'] ?? '').toString()}'), trailing: Text('${inc ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: inc ? green : Colors.red, fontWeight: FontWeight.bold))));
+                  return Card(child: ListTile(title: Text('${r['scope']} • ${(r['project_name'] ?? r['category']).toString()}'), subtitle: Text('${r['project_name'] == null ? '' : '${r['category']} • '}${dateLabel(r['date'] as String?)}${inc && (r['payment_mode'] ?? '').toString().isNotEmpty ? ' • ${r['payment_mode']}' : ''} • ${(r['note'] ?? '').toString()}'), trailing: Text('${inc ? '+' : '-'}${money(r['amount'] as num)}', style: TextStyle(color: inc ? green : Colors.red, fontWeight: FontWeight.bold))));
                 }).toList());
               },
             ),
@@ -758,7 +785,6 @@ class _InvoiceEditorPageState extends State<InvoiceEditorPage> {
       ...List.generate(items.length,(i) { final item=items[i]; final qty=double.tryParse(item['qty'].toString())??0, rate=double.tryParse(item['rate'].toString())??0; return Padding(padding:const EdgeInsets.only(bottom:12), child: Column(children:[TextFormField(initialValue:item['description'].toString(), decoration:const InputDecoration(labelText:'Description',border:OutlineInputBorder()), onChanged:(v)=>item['description']=v), const SizedBox(height:7), Row(children:[Expanded(child:TextFormField(initialValue:item['rate'].toString(), keyboardType:const TextInputType.numberWithOptions(decimal:true), decoration:const InputDecoration(labelText:'Rate',prefixText:'₹ ',border:OutlineInputBorder()), onChanged:(v)=>setState(()=>item['rate']=v))), const SizedBox(width:8), Expanded(child:TextFormField(initialValue:item['qty'].toString(), keyboardType:const TextInputType.numberWithOptions(decimal:true), decoration:const InputDecoration(labelText:'Qty',border:OutlineInputBorder()), onChanged:(v)=>setState(()=>item['qty']=v))), IconButton(onPressed:items.length==1?null:()=>setState(()=>items.removeAt(i)), icon:const Icon(Icons.delete_outline,color:Colors.red))]), Align(alignment:Alignment.centerRight, child:Text('Line total: ${money(qty*rate)}',style:const TextStyle(fontWeight:FontWeight.bold))) ])); }),
       OutlinedButton.icon(onPressed:addItem, icon:const Icon(Icons.add), label:const Text('Add Item')), const Divider(height:28),
       Align(alignment:Alignment.centerRight, child:Column(crossAxisAlignment:CrossAxisAlignment.end, children:[const Text('SUBTOTAL'), Text(money(total),style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)), const SizedBox(height:4), const Text('TOTAL',style:TextStyle(fontWeight:FontWeight.bold)), Text(money(total),style:const TextStyle(fontSize:23,fontWeight:FontWeight.bold,color:navy))])),
-      const SizedBox(height:14), DropdownButtonFormField<String>(initialValue:status, decoration:const InputDecoration(labelText:'Payment Status',border:OutlineInputBorder()), items:const [DropdownMenuItem(value:'Unpaid',child:Text('Unpaid')),DropdownMenuItem(value:'Paid',child:Text('Paid'))], onChanged:(v){if(v!=null)setState(()=>status=v);}),
       const SizedBox(height:12), TextField(controller:notes,maxLines:2,decoration:const InputDecoration(labelText:'Notes (optional)',border:OutlineInputBorder())), const SizedBox(height:20), FilledButton.icon(onPressed:saving?null:save, icon:const Icon(Icons.save), label:Text(saving?'Saving...':'Save Invoice')),
     ]));
   }
@@ -767,14 +793,14 @@ class _InvoiceEditorPageState extends State<InvoiceEditorPage> {
 Future<void> exportInvoicePdf(Map<String,dynamic> invoice) async {
   final doc = pw.Document();
   final items = (jsonDecode(invoice['items_json'].toString()) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
-  final fmt = NumberFormat.currency(locale:'en_IN',symbol:'₹ ',decimalDigits:2);
+  final fmt = NumberFormat.currency(locale:'en_IN',symbol:'Rs. ',decimalDigits:2);
   final total = (invoice['total'] as num).toDouble();
   doc.addPage(pw.Page(pageFormat:PdfPageFormat.a4, margin:const pw.EdgeInsets.fromLTRB(42,48,42,42), build:(ctx) => pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start, children:[
     pw.Row(mainAxisAlignment:pw.MainAxisAlignment.spaceBetween, crossAxisAlignment:pw.CrossAxisAlignment.start, children:[pw.Text('INVOICE',style:pw.TextStyle(fontSize:30,fontWeight:pw.FontWeight.bold,letterSpacing:3)),pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.end,children:[pw.Text('INVOICE NO: ${invoice['number']}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:5),pw.Text('DATE: ${dateLabel(invoice['invoice_date'].toString())}'),if((invoice['due_date']??'').toString().isNotEmpty) pw.Text('DUE DATE: ${dateLabel(invoice['due_date'].toString())}')])]),
     pw.SizedBox(height:65), pw.Text('ISSUED TO:',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,letterSpacing:1)), pw.SizedBox(height:7), pw.Text(invoice['customer'].toString()), if((invoice['phone']??'').toString().isNotEmpty) pw.Text(invoice['phone'].toString()), if((invoice['address']??'').toString().isNotEmpty) pw.Text(invoice['address'].toString()),
     pw.SizedBox(height:55), pw.Table(border:pw.TableBorder(horizontalInside:pw.BorderSide(color:PdfColors.grey300),top:pw.BorderSide(color:PdfColors.grey700),bottom:pw.BorderSide(color:PdfColors.grey700)), columnWidths:{0:const pw.FlexColumnWidth(4),1:const pw.FlexColumnWidth(1.3),2:const pw.FlexColumnWidth(1),3:const pw.FlexColumnWidth(1.5)}, children:[pw.TableRow(children:['DESCRIPTION','RATE','QTY','TOTAL'].map((v)=>pw.Padding(padding:const pw.EdgeInsets.symmetric(vertical:10),child:pw.Text(v,style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:9)))).toList()), ...items.map((it){final q=double.tryParse(it['qty'].toString())??0;final r=double.tryParse(it['rate'].toString())??0;return pw.TableRow(children:[it['description'].toString(),fmt.format(r),q.toString(),fmt.format(q*r)].map((v)=>pw.Padding(padding:const pw.EdgeInsets.symmetric(vertical:10),child:pw.Text(v,style:const pw.TextStyle(fontSize:9)))).toList());})]),
     pw.SizedBox(height:15), pw.Align(alignment:pw.Alignment.centerRight,child:pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.end,children:[pw.Text('SUBTOTAL     ${fmt.format(total)}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:8),pw.Text('TOTAL     ${fmt.format(total)}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:15))])),
-    pw.Spacer(), pw.Row(mainAxisAlignment:pw.MainAxisAlignment.spaceBetween, crossAxisAlignment:pw.CrossAxisAlignment.end, children:[pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start,children:[pw.Text('PAYMENT STATUS',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,letterSpacing:1)),pw.SizedBox(height:6),pw.Text(invoice['status'].toString()),if((invoice['notes']??'').toString().isNotEmpty) pw.Text('Notes: ${invoice['notes']}')]),pw.Text(invoice['status']=='Paid'?'PAID':'UNPAID',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:14,color:invoice['status']=='Paid'?PdfColors.green:PdfColors.orange))])
+    pw.Spacer(), if((invoice['notes']??'').toString().isNotEmpty) pw.Text('Notes: ${invoice['notes']}')
   ])));
   await Printing.layoutPdf(onLayout:(format) async => doc.save(), name:'${invoice['number']}.pdf');
 }
