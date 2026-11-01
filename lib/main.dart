@@ -3,9 +3,9 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
 import 'package:flutter/foundation.dart';
+import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
-import 'package:pdf/pdf.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -381,9 +381,9 @@ class _ReportsPageState extends State<ReportsPage> {
         pw.Text('Period: ${DateFormat('dd-MM-yyyy').format(from)} to ${DateFormat('dd-MM-yyyy').format(to)}'),
         pw.SizedBox(height: 16),
         pw.Table(border: pw.TableBorder.all(color: PdfColors.grey400), children: [
-          _pdfRow('Total Income', money(summary['income'])),
-          _pdfRow('Total Expense', money(summary['expense'])),
-          _pdfRow('Net Balance', money(summary['balance'])),
+          _pdfRow('Total Income', '+Rs. ${NumberFormat('#,##0.00', 'en_IN').format(summary['income'] ?? 0)}'),
+          _pdfRow('Total Expense', '-Rs. ${NumberFormat('#,##0.00', 'en_IN').format(summary['expense'] ?? 0)}'),
+          _pdfRow('Net Balance', '${(summary['balance'] ?? 0) < 0 ? '-' : ''}Rs. ${NumberFormat('#,##0.00', 'en_IN').format((summary['balance'] ?? 0).abs())}'),
         ]),
         pw.SizedBox(height: 18),
         pw.Text('Transactions', style: pw.TextStyle(fontSize: 15, fontWeight: pw.FontWeight.bold)),
@@ -397,7 +397,7 @@ class _ReportsPageState extends State<ReportsPage> {
               r['date'] == null ? '-' : dateLabel(r['date'].toString()),
               r['type'].toString().toUpperCase(),
               (r['note'] ?? r['category'] ?? '').toString(),
-              '${r['type'] == 'income' ? '+' : '-'}${money(r['amount'] as num)}',
+              '${r['type'].toString().toLowerCase() == 'income' ? '+' : '-'}Rs. ${NumberFormat('#,##0.00', 'en_IN').format((r['amount'] as num).abs())}',
             ].map((v) => pw.Padding(padding: const pw.EdgeInsets.all(5), child: pw.Text(v))).toList())),
           ],
         ),
