@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
@@ -730,7 +731,7 @@ class _InvoicesPageState extends State<InvoicesPage> {
         leading: CircleAvatar(backgroundColor: r['status']=='Paid' ? green.withValues(alpha:.12) : Colors.orange.withValues(alpha:.12), child: Icon(Icons.receipt_long, color: r['status']=='Paid' ? green : Colors.orange)),
         title: Text('${r['number']} • ${r['customer']}', style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Text('${dateLabel(r['invoice_date'] as String?)}  •  ${r['status']}'),
-        trailing: PopupMenuButton<String>(onSelected: (v) { if (v=='edit') createOrEdit(r); if (v=='paid') setStatus(r,'Paid'); if (v=='unpaid') setStatus(r,'Unpaid'); if (v=='delete') remove(r); if (v=='pdf') exportInvoicePdf(r); }, itemBuilder: (_) => [const PopupMenuItem(value:'pdf',child:Text('Share / Print PDF')), const PopupMenuItem(value:'edit',child:Text('Edit')), if (r['status']=='Unpaid') const PopupMenuItem(value:'paid',child:Text('Mark as Paid')), if (r['status']=='Paid') const PopupMenuItem(value:'unpaid',child:Text('Mark as Unpaid')), const PopupMenuItem(value:'delete',child:Text('Delete'))]),
+        trailing: PopupMenuButton<String>(onSelected: (v) { if (v=='edit') createOrEdit(r); if (v=='paid') setStatus(r,'Paid'); if (v=='unpaid') setStatus(r,'Unpaid'); if (v=='delete') remove(r); if (v=='share') shareInvoicePdf(r); if (v=='print') printInvoicePdf(r); }, itemBuilder: (_) => [const PopupMenuItem(value:'share',child:Text('Share PDF')), const PopupMenuItem(value:'print',child:Text('Print PDF')), const PopupMenuItem(value:'edit',child:Text('Edit')), if (r['status']=='Unpaid') const PopupMenuItem(value:'paid',child:Text('Mark as Paid')), if (r['status']=='Paid') const PopupMenuItem(value:'unpaid',child:Text('Mark as Unpaid')), const PopupMenuItem(value:'delete',child:Text('Delete'))]),
         onTap: () => createOrEdit(r),
       ))).toList());
     }),
@@ -778,8 +779,8 @@ class _InvoiceEditorPageState extends State<InvoiceEditorPage> {
       const Text('INVOICE', style: TextStyle(fontSize:28, fontWeight:FontWeight.bold, letterSpacing:3, color:navy)),
       const SizedBox(height:14), Text('Invoice No: $number', style: const TextStyle(fontWeight:FontWeight.bold)),
       const SizedBox(height:12), TextField(controller:customer, decoration:const InputDecoration(labelText:'Issued To / Customer', border:OutlineInputBorder())),
-      const SizedBox(height:10), TextField(controller:phone, keyboardType:TextInputType.phone, decoration:const InputDecoration(labelText:'Phone (optional)', border:OutlineInputBorder())),
       const SizedBox(height:10), TextField(controller:address, maxLines:2, decoration:const InputDecoration(labelText:'Address (optional)', border:OutlineInputBorder())),
+      const SizedBox(height:10), TextField(controller:phone, keyboardType:TextInputType.phone, decoration:const InputDecoration(labelText:'Phone (optional)', border:OutlineInputBorder())),
       const SizedBox(height:10), Wrap(spacing:10, runSpacing:8, children:[OutlinedButton.icon(onPressed:()=>chooseDate(false), icon:const Icon(Icons.calendar_today), label:Text('Date: ${dateLabel(invoiceDate.toIso8601String())}')), OutlinedButton.icon(onPressed:()=>chooseDate(true), icon:const Icon(Icons.event), label:Text('Due: ${dueDate==null?'Not set':dateLabel(dueDate!.toIso8601String())}'))]),
       const SizedBox(height:18), const Divider(), const Text('DESCRIPTION                         RATE          QTY          TOTAL', style:TextStyle(fontWeight:FontWeight.bold,fontSize:12)), const Divider(),
       ...List.generate(items.length,(i) { final item=items[i]; final qty=double.tryParse(item['qty'].toString())??0, rate=double.tryParse(item['rate'].toString())??0; return Padding(padding:const EdgeInsets.only(bottom:12), child: Column(children:[TextFormField(initialValue:item['description'].toString(), decoration:const InputDecoration(labelText:'Description',border:OutlineInputBorder()), onChanged:(v)=>item['description']=v), const SizedBox(height:7), Row(children:[Expanded(child:TextFormField(initialValue:item['rate'].toString(), keyboardType:const TextInputType.numberWithOptions(decimal:true), decoration:const InputDecoration(labelText:'Rate',prefixText:'₹ ',border:OutlineInputBorder()), onChanged:(v)=>setState(()=>item['rate']=v))), const SizedBox(width:8), Expanded(child:TextFormField(initialValue:item['qty'].toString(), keyboardType:const TextInputType.numberWithOptions(decimal:true), decoration:const InputDecoration(labelText:'Qty',border:OutlineInputBorder()), onChanged:(v)=>setState(()=>item['qty']=v))), IconButton(onPressed:items.length==1?null:()=>setState(()=>items.removeAt(i)), icon:const Icon(Icons.delete_outline,color:Colors.red))]), Align(alignment:Alignment.centerRight, child:Text('Line total: ${money(qty*rate)}',style:const TextStyle(fontWeight:FontWeight.bold))) ])); }),
@@ -790,17 +791,27 @@ class _InvoiceEditorPageState extends State<InvoiceEditorPage> {
   }
 }
 
-Future<void> exportInvoicePdf(Map<String,dynamic> invoice) async {
+Future<Uint8List> buildInvoicePdf(Map<String,dynamic> invoice) async {
   final doc = pw.Document();
   final items = (jsonDecode(invoice['items_json'].toString()) as List).map((e)=>Map<String,dynamic>.from(e as Map)).toList();
   final fmt = NumberFormat.currency(locale:'en_IN',symbol:'Rs. ',decimalDigits:2);
   final total = (invoice['total'] as num).toDouble();
   doc.addPage(pw.Page(pageFormat:PdfPageFormat.a4, margin:const pw.EdgeInsets.fromLTRB(42,48,42,42), build:(ctx) => pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.start, children:[
     pw.Row(mainAxisAlignment:pw.MainAxisAlignment.spaceBetween, crossAxisAlignment:pw.CrossAxisAlignment.start, children:[pw.Text('INVOICE',style:pw.TextStyle(fontSize:30,fontWeight:pw.FontWeight.bold,letterSpacing:3)),pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.end,children:[pw.Text('INVOICE NO: ${invoice['number']}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:5),pw.Text('DATE: ${dateLabel(invoice['invoice_date'].toString())}'),if((invoice['due_date']??'').toString().isNotEmpty) pw.Text('DUE DATE: ${dateLabel(invoice['due_date'].toString())}')])]),
-    pw.SizedBox(height:65), pw.Text('ISSUED TO:',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,letterSpacing:1)), pw.SizedBox(height:7), pw.Text(invoice['customer'].toString()), if((invoice['phone']??'').toString().isNotEmpty) pw.Text(invoice['phone'].toString()), if((invoice['address']??'').toString().isNotEmpty) pw.Text(invoice['address'].toString()),
+    pw.SizedBox(height:65), pw.Text('ISSUED TO:',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,letterSpacing:1)), pw.SizedBox(height:7), pw.Text(invoice['customer'].toString()), if((invoice['address']??'').toString().isNotEmpty) pw.Text(invoice['address'].toString()), if((invoice['phone']??'').toString().isNotEmpty) pw.Text(invoice['phone'].toString()),
     pw.SizedBox(height:55), pw.Table(border:pw.TableBorder(horizontalInside:pw.BorderSide(color:PdfColors.grey300),top:pw.BorderSide(color:PdfColors.grey700),bottom:pw.BorderSide(color:PdfColors.grey700)), columnWidths:{0:const pw.FlexColumnWidth(4),1:const pw.FlexColumnWidth(1.3),2:const pw.FlexColumnWidth(1),3:const pw.FlexColumnWidth(1.5)}, children:[pw.TableRow(children:['DESCRIPTION','RATE','QTY','TOTAL'].map((v)=>pw.Padding(padding:const pw.EdgeInsets.symmetric(vertical:10),child:pw.Text(v,style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:9)))).toList()), ...items.map((it){final q=double.tryParse(it['qty'].toString())??0;final r=double.tryParse(it['rate'].toString())??0;return pw.TableRow(children:[it['description'].toString(),fmt.format(r),q.toString(),fmt.format(q*r)].map((v)=>pw.Padding(padding:const pw.EdgeInsets.symmetric(vertical:10),child:pw.Text(v,style:const pw.TextStyle(fontSize:9)))).toList());})]),
     pw.SizedBox(height:15), pw.Align(alignment:pw.Alignment.centerRight,child:pw.Column(crossAxisAlignment:pw.CrossAxisAlignment.end,children:[pw.Text('SUBTOTAL     ${fmt.format(total)}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold)),pw.SizedBox(height:8),pw.Text('TOTAL     ${fmt.format(total)}',style:pw.TextStyle(fontWeight:pw.FontWeight.bold,fontSize:15))])),
     pw.Spacer(), if((invoice['notes']??'').toString().isNotEmpty) pw.Text('Notes: ${invoice['notes']}')
   ])));
-  await Printing.layoutPdf(onLayout:(format) async => doc.save(), name:'${invoice['number']}.pdf');
+  return doc.save();
+}
+
+Future<void> shareInvoicePdf(Map<String,dynamic> invoice) async {
+  final bytes = await buildInvoicePdf(invoice);
+  await Printing.sharePdf(bytes: bytes, filename: '${invoice['number']}.pdf');
+}
+
+Future<void> printInvoicePdf(Map<String,dynamic> invoice) async {
+  final bytes = await buildInvoicePdf(invoice);
+  await Printing.layoutPdf(onLayout: (format) async => bytes, name: '${invoice['number']}.pdf');
 }
