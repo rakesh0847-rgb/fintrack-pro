@@ -948,17 +948,35 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
     ])), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save'))])));
     if (ok == true) { await (await db.database).insert('staff_attendance', {'staff_id': widget.staff['id'], 'work_date': date, 'status': status, 'check_in': checkIn.text.trim(), 'check_out': checkOut.text.trim(), 'overtime_hours': status == 'Present' ? _calculatedOvertime(checkIn.text.trim(), checkOut.text.trim()) : 0}, conflictAlgorithm: ConflictAlgorithm.replace); setState(() {}); }
   }
+  double paidDayFraction(Map<String, dynamic> row) {
+    final status = (row['status'] ?? '').toString();
+    if (status == 'Absent' || status == 'Leave') return 0;
+    if (status == 'Half-day') return 0.5;
+    if (status != 'Present') return 0;
+    final checkIn = (row['check_in'] ?? '').toString().trim();
+    final checkOut = (row['check_out'] ?? '').toString().trim();
+    // Older attendance entries without times remain a full-day entry.
+    if (checkIn.isEmpty || checkOut.isEmpty) return 1;
+    final start = _hoursFromTime(checkIn);
+    final end = _hoursFromTime(checkOut);
+    var worked = end - start;
+    if (worked < 0) worked += 24;
+    // Pay only the first 8.5 hours as the normal day; excess is overtime.
+    return (worked / 8.5).clamp(0.0, 1.0).toDouble();
+  }
+
   Future<double> calculatedSalary() async {
     final rows = await attendance();
-    final present = rows.where((r) => r['status'] == 'Present').length;
-    final overtime = rows.fold<double>(0, (sum, r) => sum + overtimeFor(r));
+    final payableDays = rows.fold<double>(0, (sum, row) => sum + paidDayFraction(row));
+    final overtime = rows.fold<double>(0, (sum, row) => sum + overtimeFor(row));
     final rate = ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0);
-    // Monthly salary is divided by 26 working days; only marked Present days are payable.
+    // Monthly salary is based on 26 working days; partial attendance is paid proportionally.
     final base = widget.staff['salary_type'] == 'Daily'
-        ? present * rate
-        : present * (rate / 26.0);
+        ? payableDays * rate
+        : payableDays * (rate / 26.0);
     return base + overtime * ((widget.staff['overtime_rate'] as num?)?.toDouble() ?? 0);
   }
+
   Future<void> recordPayment({required String type}) async {
     final amount = TextEditingController();
     final note = TextEditingController();
