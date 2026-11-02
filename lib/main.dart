@@ -905,28 +905,58 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
   String period() => DateFormat('yyyy-MM').format(month);
   Future<List<Map<String,dynamic>>> attendance() async => (await db.database).query('staff_attendance', where: 'staff_id = ? AND work_date LIKE ?', whereArgs: [widget.staff['id'], '${period()}%'], orderBy: 'work_date');
   Future<List<Map<String,dynamic>>> payments() async => (await db.database).query('staff_payments', where: 'staff_id = ? AND period = ?', whereArgs: [widget.staff['id'], period()], orderBy: 'pay_date DESC');
+  double _calculatedOvertime(String checkIn, String checkOut) {
+    final start = _hoursFromTime(checkIn);
+    final end = _hoursFromTime(checkOut);
+    if (checkIn.isEmpty || checkOut.isEmpty) return 0;
+    var worked = end - start;
+    if (worked < 0) worked += 24;
+    return (worked - 8.5).clamp(0.0, 24.0).toDouble();
+  }
+
+  double _hoursFromTime(String value) {
+    final parts = value.trim().split(':');
+    if (parts.length != 2) return 0;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null || h < 0 || h > 23 || m < 0 || m > 59) return 0;
+    return h + m / 60.0;
+  }
+
+  double overtimeFor(Map<String, dynamic> row) {
+    if (row['status'] != 'Present') return 0;
+    final start = _hoursFromTime((row['check_in'] ?? '').toString());
+    final end = _hoursFromTime((row['check_out'] ?? '').toString());
+    if ((row['check_in'] ?? '').toString().trim().isNotEmpty &&
+        (row['check_out'] ?? '').toString().trim().isNotEmpty) {
+      return _calculatedOvertime((row['check_in'] ?? '').toString(), (row['check_out'] ?? '').toString());
+    }
+    // Keep previously saved manual overtime for older attendance entries.
+    return (((row['overtime_hours'] as num?)?.toDouble() ?? 0).clamp(0.0, 24.0)).toDouble();
+  }
+
   Future<void> markAttendance(DateTime day) async {
     final date = DateFormat('yyyy-MM-dd').format(day);
     final rows = await (await db.database).query('staff_attendance', where: 'staff_id = ? AND work_date = ?', whereArgs: [widget.staff['id'], date], limit: 1);
     String status = rows.isEmpty ? 'Present' : rows.first['status'].toString();
     final checkIn = TextEditingController(text: rows.isEmpty ? '' : rows.first['check_in']?.toString() ?? '');
     final checkOut = TextEditingController(text: rows.isEmpty ? '' : rows.first['check_out']?.toString() ?? '');
-    final overtime = TextEditingController(text: rows.isEmpty ? '0' : rows.first['overtime_hours'].toString());
     final ok = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(title: Text('Attendance • ${DateFormat('dd MMM yyyy').format(day)}'), content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
       DropdownButtonFormField<String>(value: status, items: const [DropdownMenuItem(value: 'Present', child: Text('Present')), DropdownMenuItem(value: 'Absent', child: Text('Absent')), DropdownMenuItem(value: 'Leave', child: Text('Leave'))], onChanged: (v) => setD(() => status = v ?? 'Present'), decoration: const InputDecoration(labelText: 'Status')),
       TextField(controller: checkIn, decoration: const InputDecoration(labelText: 'Check-in (e.g. 09:00)')),
       TextField(controller: checkOut, decoration: const InputDecoration(labelText: 'Check-out (e.g. 18:00)')),
-      TextField(controller: overtime, decoration: const InputDecoration(labelText: 'Overtime Hours'), keyboardType: TextInputType.number),
     ])), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save'))])));
-    if (ok == true) { await (await db.database).insert('staff_attendance', {'staff_id': widget.staff['id'], 'work_date': date, 'status': status, 'check_in': checkIn.text.trim(), 'check_out': checkOut.text.trim(), 'overtime_hours': double.tryParse(overtime.text) ?? 0}, conflictAlgorithm: ConflictAlgorithm.replace); setState(() {}); }
+    if (ok == true) { await (await db.database).insert('staff_attendance', {'staff_id': widget.staff['id'], 'work_date': date, 'status': status, 'check_in': checkIn.text.trim(), 'check_out': checkOut.text.trim(), 'overtime_hours': status == 'Present' ? _calculatedOvertime(checkIn.text.trim(), checkOut.text.trim()) : 0}, conflictAlgorithm: ConflictAlgorithm.replace); setState(() {}); }
   }
   Future<double> calculatedSalary() async {
     final rows = await attendance();
     final present = rows.where((r) => r['status'] == 'Present').length;
-    final overtime = rows.fold<double>(0, (sum, r) => sum + ((r['overtime_hours'] as num?)?.toDouble() ?? 0));
+    final overtime = rows.fold<double>(0, (sum, r) => sum + overtimeFor(r));
+    final rate = ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0);
+    // Monthly salary is divided by 26 working days; only marked Present days are payable.
     final base = widget.staff['salary_type'] == 'Daily'
-      ? present * ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0)
-      : ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0);
+        ? present * rate
+        : present * (rate / 26.0);
     return base + overtime * ((widget.staff['overtime_rate'] as num?)?.toDouble() ?? 0);
   }
   Future<void> recordPayment({required String type}) async {
@@ -954,7 +984,7 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
     final present = att.where((r) => r['status'] == 'Present').length;
     final absent = att.where((r) => r['status'] == 'Absent').length;
     final leave = att.where((r) => r['status'] == 'Leave').length;
-    final overtime = att.fold<double>(0, (v, r) => v + ((r['overtime_hours'] as num?)?.toDouble() ?? 0));
+    final overtime = att.fold<double>(0, (v, r) => v + overtimeFor(r));
     final salary = await calculatedSalary();
     final paid = pays.where((r) => r['payment_type'] == 'Salary').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
     final advance = pays.where((r) => r['payment_type'] == 'Advance').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
@@ -986,7 +1016,7 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
       final a = aSnap.data!;
       final present = a.where((r) => r['status'] == 'Present').length;
       final absent = a.where((r) => r['status'] == 'Absent').length;
-      final overtime = a.fold<double>(0, (v, r) => v + ((r['overtime_hours'] as num?)?.toDouble() ?? 0));
+      final overtime = a.fold<double>(0, (v, r) => v + overtimeFor(r));
       return ListView(padding: const EdgeInsets.all(14), children: [
         Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(widget.staff['salary_type'].toString() == 'Monthly' ? 'Monthly Salary' : 'Daily Wage', style: const TextStyle(color: Colors.grey)),
