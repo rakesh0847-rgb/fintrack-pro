@@ -17,7 +17,7 @@ dependencies:
   path: ^1.9.1
   pdf: ^3.11.3
   printing: ^5.14.2
-
+  sqflite_common_ffi_web: ^1.2.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
