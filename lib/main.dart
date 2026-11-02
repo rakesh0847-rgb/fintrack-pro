@@ -1004,7 +1004,8 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
             for (int d = 1; d <= DateTime(month.year, month.month + 1, 0).day; d++)
               Builder(builder: (ctx) {
                 final date = DateFormat('yyyy-MM-dd').format(DateTime(month.year, month.month, d));
-                final matches = a.where((r) => r['work_date'] == date);\n                final row = matches.isEmpty ? null : matches.first;
+                final matches = a.where((r) => r['work_date'] == date);
+                final row = matches.isEmpty ? null : matches.first;
                 final status = row?['status']?.toString();
                 final color = status == 'Present' ? green : status == 'Absent' ? Colors.red : status == 'Leave' ? Colors.orange : Colors.grey.shade200;
                 return InkWell(onTap: () => markAttendance(DateTime(month.year, month.month, d)), child: Container(margin: const EdgeInsets.all(2), decoration: BoxDecoration(color: color.withValues(alpha: status == null ? .5 : .9), borderRadius: BorderRadius.circular(8)), child: Center(child: Text('$d', style: TextStyle(fontWeight: FontWeight.w600, color: status == null ? Colors.black87 : Colors.white)))));
