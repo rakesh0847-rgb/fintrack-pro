@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
@@ -923,13 +924,25 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
     return h + m / 60.0;
   }
 
+  double workedHoursFor(Map<String, dynamic> row) {
+    if (row['status'] != 'Present') return 0;
+    final inText = (row['check_in'] ?? '').toString().trim();
+    final outText = (row['check_out'] ?? '').toString().trim();
+    if (inText.isEmpty || outText.isEmpty) return 8.5; // legacy/manual full-day entry
+    var hours = _hoursFromTime(outText) - _hoursFromTime(inText);
+    if (hours < 0) hours += 24;
+    return hours.clamp(0.0, 24.0).toDouble();
+  }
+
+  double payableDayUnitsFor(Map<String, dynamic> row) =>
+      (workedHoursFor(row) / 8.5).clamp(0.0, 1.0).toDouble();
+
   double overtimeFor(Map<String, dynamic> row) {
     if (row['status'] != 'Present') return 0;
-    final start = _hoursFromTime((row['check_in'] ?? '').toString());
-    final end = _hoursFromTime((row['check_out'] ?? '').toString());
-    if ((row['check_in'] ?? '').toString().trim().isNotEmpty &&
-        (row['check_out'] ?? '').toString().trim().isNotEmpty) {
-      return _calculatedOvertime((row['check_in'] ?? '').toString(), (row['check_out'] ?? '').toString());
+    final inText = (row['check_in'] ?? '').toString().trim();
+    final outText = (row['check_out'] ?? '').toString().trim();
+    if (inText.isNotEmpty && outText.isNotEmpty) {
+      return (workedHoursFor(row) - 8.5).clamp(0.0, 24.0).toDouble();
     }
     // Keep previously saved manual overtime for older attendance entries.
     return (((row['overtime_hours'] as num?)?.toDouble() ?? 0).clamp(0.0, 24.0)).toDouble();
@@ -948,35 +961,15 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
     ])), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save'))])));
     if (ok == true) { await (await db.database).insert('staff_attendance', {'staff_id': widget.staff['id'], 'work_date': date, 'status': status, 'check_in': checkIn.text.trim(), 'check_out': checkOut.text.trim(), 'overtime_hours': status == 'Present' ? _calculatedOvertime(checkIn.text.trim(), checkOut.text.trim()) : 0}, conflictAlgorithm: ConflictAlgorithm.replace); setState(() {}); }
   }
-  double paidDayFraction(Map<String, dynamic> row) {
-    final status = (row['status'] ?? '').toString();
-    if (status == 'Absent' || status == 'Leave') return 0;
-    if (status == 'Half-day') return 0.5;
-    if (status != 'Present') return 0;
-    final checkIn = (row['check_in'] ?? '').toString().trim();
-    final checkOut = (row['check_out'] ?? '').toString().trim();
-    // Older attendance entries without times remain a full-day entry.
-    if (checkIn.isEmpty || checkOut.isEmpty) return 1;
-    final start = _hoursFromTime(checkIn);
-    final end = _hoursFromTime(checkOut);
-    var worked = end - start;
-    if (worked < 0) worked += 24;
-    // Pay only the first 8.5 hours as the normal day; excess is overtime.
-    return (worked / 8.5).clamp(0.0, 1.0).toDouble();
-  }
-
   Future<double> calculatedSalary() async {
     final rows = await attendance();
-    final payableDays = rows.fold<double>(0, (sum, row) => sum + paidDayFraction(row));
-    final overtime = rows.fold<double>(0, (sum, row) => sum + overtimeFor(row));
+    final payableDays = rows.fold<double>(0, (sum, r) => sum + payableDayUnitsFor(r));
+    final overtime = rows.fold<double>(0, (sum, r) => sum + overtimeFor(r));
     final rate = ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0);
-    // Monthly salary is based on 26 working days; partial attendance is paid proportionally.
-    final base = widget.staff['salary_type'] == 'Daily'
-        ? payableDays * rate
-        : payableDays * (rate / 26.0);
+    final dailyRate = widget.staff['salary_type'] == 'Daily' ? rate : rate / 26.0;
+    final base = payableDays * dailyRate;
     return base + overtime * ((widget.staff['overtime_rate'] as num?)?.toDouble() ?? 0);
   }
-
   Future<void> recordPayment({required String type}) async {
     final amount = TextEditingController();
     final note = TextEditingController();
@@ -999,31 +992,69 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
   Future<void> exportStaffReport() async {
     final att = await attendance();
     final pays = await payments();
-    final present = att.where((r) => r['status'] == 'Present').length;
+    final presentRows = att.where((r) => r['status'] == 'Present').toList();
     final absent = att.where((r) => r['status'] == 'Absent').length;
     final leave = att.where((r) => r['status'] == 'Leave').length;
+    final fullDays = presentRows.where((r) => workedHoursFor(r) >= 8.5).length;
+    final halfDays = presentRows.where((r) => workedHoursFor(r) >= 4.0 && workedHoursFor(r) < 8.5).length;
+    final shortDays = presentRows.where((r) => workedHoursFor(r) < 4.0).length;
+    final workedHours = presentRows.fold<double>(0, (v, r) => v + workedHoursFor(r));
+    final payableDays = presentRows.fold<double>(0, (v, r) => v + payableDayUnitsFor(r));
     final overtime = att.fold<double>(0, (v, r) => v + overtimeFor(r));
-    final salary = await calculatedSalary();
+    final overtimeRate = (widget.staff['overtime_rate'] as num?)?.toDouble() ?? 0;
+    final overtimePay = overtime * overtimeRate;
+    final rate = (widget.staff['salary_rate'] as num?)?.toDouble() ?? 0;
+    final dailyRate = widget.staff['salary_type'] == 'Daily' ? rate : rate / 26.0;
+    final absentDeduction = (absent + leave) * dailyRate;
+    final baseEarned = payableDays * dailyRate;
+    final salary = baseEarned + overtimePay;
     final paid = pays.where((r) => r['payment_type'] == 'Salary').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
     final advance = pays.where((r) => r['payment_type'] == 'Advance').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+
+    // Embed a Unicode font so the Indian Rupee symbol renders correctly in the PDF.
+    final fontData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final unicodeFont = pw.Font.ttf(fontData);
+    final reportTheme = pw.ThemeData.withFont(base: unicodeFont, bold: unicodeFont, italic: unicodeFont, boldItalic: unicodeFont);
     final doc = pw.Document();
-    doc.addPage(pw.Page(pageFormat: PdfPageFormat.a4, build: (ctx) => pw.Padding(padding: const pw.EdgeInsets.all(28), child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-      pw.Text('STAFF MONTHLY REPORT', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
-      pw.SizedBox(height: 8), pw.Text(widget.staff['name'].toString(), style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
-      pw.Text('Period: ${DateFormat('MMMM yyyy').format(month)}'),
-      pw.Divider(),
-      pw.Text('Attendance', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-      pw.Text('Present: $present    Absent: $absent    Leave: $leave    Overtime: ${overtime.toStringAsFixed(1)} hours'),
-      pw.SizedBox(height: 16),
-      pw.Text('Salary Summary', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-      pw.Text('Calculated salary: ${money(salary)}'),
-      pw.Text('Salary paid: ${money(paid)}'),
-      pw.Text('Advance paid: ${money(advance)}'),
-      pw.Text('Pending: ${money((salary - paid - advance).clamp(0, double.infinity))}'),
-      pw.SizedBox(height: 16),
-      pw.Text('Payment History', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
-      pw.Table.fromTextArray(headers: ['Date', 'Type', 'Mode', 'Amount'], data: pays.map((r) => [dateLabel(r['pay_date']?.toString()), r['payment_type'].toString(), r['payment_mode'].toString(), money((r['amount'] as num?)?.toDouble())]).toList()),
-    ]))));
+    doc.addPage(pw.Page(
+      pageFormat: PdfPageFormat.a4,
+      theme: reportTheme,
+      build: (ctx) => pw.Padding(padding: const pw.EdgeInsets.all(28), child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+        pw.Text('STAFF MONTHLY REPORT', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 8),
+        pw.Text(widget.staff['name'].toString(), style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+        pw.Text('Period: ${DateFormat('MMMM yyyy').format(month)}'),
+        pw.Divider(),
+        pw.Text('Attendance Summary', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5),
+        pw.TableHelper.fromTextArray(headers: ['Attendance', 'Days'], data: [
+          ['Full days (8.5+ hrs)', '$fullDays'],
+          ['Half days (4.0–8.49 hrs)', '$halfDays'],
+          ['Short days (<4.0 hrs)', '$shortDays'],
+          ['Absent', '$absent'],
+          ['Leave', '$leave'],
+          ['Total worked hours', workedHours.toStringAsFixed(2)],
+          ['Payable day equivalents', payableDays.toStringAsFixed(2)],
+          ['Overtime hours', overtime.toStringAsFixed(2)],
+        ]),
+        pw.SizedBox(height: 16),
+        pw.Text('Salary Calculation', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+        pw.SizedBox(height: 5),
+        pw.TableHelper.fromTextArray(headers: ['Description', 'Amount'], data: [
+          ['Daily salary rate', money(dailyRate)],
+          ['Earned basic salary', money(baseEarned)],
+          ['Absent / Leave deduction', money(absentDeduction)],
+          ['Overtime (${overtime.toStringAsFixed(2)} hrs × ${money(overtimeRate)})', money(overtimePay)],
+          ['Calculated salary', money(salary)],
+          ['Salary paid', money(paid)],
+          ['Advance paid', money(advance)],
+          ['Pending', money((salary - paid - advance).clamp(0, double.infinity))],
+        ]),
+        pw.SizedBox(height: 16),
+        pw.Text('Payment History', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+        pw.TableHelper.fromTextArray(headers: ['Date', 'Type', 'Mode', 'Amount'], data: pays.map((r) => [dateLabel(r['pay_date']?.toString()), r['payment_type'].toString(), r['payment_mode'].toString(), money((r['amount'] as num?)?.toDouble())]).toList()),
+      ])),
+    ));
     await Printing.layoutPdf(onLayout: (_) async => doc.save());
   }
   @override
