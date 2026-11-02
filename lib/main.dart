@@ -66,7 +66,7 @@ class FinanceDatabase {
     final dbFile = p.join(dbPath, 'fintrack_pro.db');
     _database = await openDatabase(
       dbFile,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE transactions (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,11 +92,31 @@ class FinanceDatabase {
           invoice_date TEXT NOT NULL, due_date TEXT, items_json TEXT NOT NULL, subtotal REAL NOT NULL, total REAL NOT NULL,
           status TEXT NOT NULL DEFAULT 'Unpaid', notes TEXT
         )''');
+        await db.execute('''CREATE TABLE staff (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, address TEXT,
+          salary_type TEXT NOT NULL DEFAULT 'Monthly', salary_rate REAL NOT NULL DEFAULT 0,
+          overtime_rate REAL NOT NULL DEFAULT 0, joining_date TEXT, active INTEGER NOT NULL DEFAULT 1
+        )''');
+        await db.execute('''CREATE TABLE staff_attendance (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL, work_date TEXT NOT NULL,
+          status TEXT NOT NULL, check_in TEXT, check_out TEXT, overtime_hours REAL NOT NULL DEFAULT 0,
+          UNIQUE(staff_id, work_date), FOREIGN KEY(staff_id) REFERENCES staff(id)
+        )''');
+        await db.execute('''CREATE TABLE staff_payments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL, pay_date TEXT NOT NULL,
+          period TEXT, payment_type TEXT NOT NULL, amount REAL NOT NULL, payment_mode TEXT NOT NULL,
+          note TEXT, FOREIGN KEY(staff_id) REFERENCES staff(id)
+        )''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) { await db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'); }
         if (oldVersion < 3) { await db.execute('''CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT NOT NULL UNIQUE, customer TEXT NOT NULL, phone TEXT, address TEXT, invoice_date TEXT NOT NULL, due_date TEXT, items_json TEXT NOT NULL, subtotal REAL NOT NULL, total REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Unpaid', notes TEXT)'''); }
         if (oldVersion < 4) { await db.execute('ALTER TABLE transactions ADD COLUMN payment_mode TEXT'); }
+        if (oldVersion < 5) {
+          await db.execute('''CREATE TABLE IF NOT EXISTS staff (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, address TEXT, salary_type TEXT NOT NULL DEFAULT 'Monthly', salary_rate REAL NOT NULL DEFAULT 0, overtime_rate REAL NOT NULL DEFAULT 0, joining_date TEXT, active INTEGER NOT NULL DEFAULT 1)''');
+          await db.execute('''CREATE TABLE IF NOT EXISTS staff_attendance (id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL, work_date TEXT NOT NULL, status TEXT NOT NULL, check_in TEXT, check_out TEXT, overtime_hours REAL NOT NULL DEFAULT 0, UNIQUE(staff_id, work_date), FOREIGN KEY(staff_id) REFERENCES staff(id))''');
+          await db.execute('''CREATE TABLE IF NOT EXISTS staff_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, staff_id INTEGER NOT NULL, pay_date TEXT NOT NULL, period TEXT, payment_type TEXT NOT NULL, amount REAL NOT NULL, payment_mode TEXT NOT NULL, note TEXT, FOREIGN KEY(staff_id) REFERENCES staff(id))''');
+        }
       },
     );
     return _database!;
@@ -265,6 +285,7 @@ class _HomePageState extends State<HomePage> {
         Row(children: [Expanded(child: _quickCard(t('Add Income'), Icons.add_circle, green, () => quickEntry('income'))), const SizedBox(width: 10), Expanded(child: _quickCard(t('Add Expense'), Icons.remove_circle, Colors.red, () => quickEntry('expense')))]),
         const SizedBox(height: 10), Row(children: [Expanded(child: _quickCard(t('Reports'), Icons.bar_chart, navy, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsPage())))), const SizedBox(width: 10), Expanded(child: _quickCard(t('Projects'), Icons.folder, Colors.deepOrange, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProjectsPage()))))]),
         const SizedBox(height: 10), _quickCard('Normal Invoice', Icons.receipt_long, green, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const InvoicesPage())).then((_) { if (mounted) setState(() {}); })),
+        const SizedBox(height: 10), _quickCard('Staff Management', Icons.badge_outlined, navy, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const StaffPage())).then((_) { if (mounted) setState(() {}); })),
         const SizedBox(height: 18), Center(child: Text('FinTrack Pro • Personal, Family & Business', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)))
       ]);
     }),
@@ -814,4 +835,202 @@ Future<void> shareInvoicePdf(Map<String,dynamic> invoice) async {
 Future<void> printInvoicePdf(Map<String,dynamic> invoice) async {
   final bytes = await buildInvoicePdf(invoice);
   await Printing.layoutPdf(onLayout: (format) async => bytes, name: '${invoice['number']}.pdf');
+}
+
+
+class StaffPage extends StatefulWidget {
+  const StaffPage({super.key});
+  @override
+  State<StaffPage> createState() => _StaffPageState();
+}
+class _StaffPageState extends State<StaffPage> {
+  final db = FinanceDatabase.instance;
+  Future<void> refresh() async { if (mounted) setState(() {}); }
+  Future<void> addOrEdit([Map<String,dynamic>? staff]) async {
+    final name = TextEditingController(text: staff?['name']?.toString() ?? '');
+    final phone = TextEditingController(text: staff?['phone']?.toString() ?? '');
+    final address = TextEditingController(text: staff?['address']?.toString() ?? '');
+    final rate = TextEditingController(text: staff?['salary_rate']?.toString() ?? '');
+    final overtime = TextEditingController(text: staff?['overtime_rate']?.toString() ?? '');
+    String salaryType = staff?['salary_type']?.toString() ?? 'Monthly';
+    final joining = TextEditingController(text: staff?['joining_date']?.toString() ?? DateFormat('yyyy-MM-dd').format(DateTime.now()));
+    final result = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(
+      title: Text(staff == null ? 'Add Staff' : 'Edit Staff'),
+      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: name, decoration: const InputDecoration(labelText: 'Staff Name *')),
+        TextField(controller: phone, decoration: const InputDecoration(labelText: 'Phone'), keyboardType: TextInputType.phone),
+        TextField(controller: address, decoration: const InputDecoration(labelText: 'Address')),
+        DropdownButtonFormField<String>(value: salaryType, decoration: const InputDecoration(labelText: 'Salary Type'), items: const [DropdownMenuItem(value: 'Monthly', child: Text('Monthly Salary')), DropdownMenuItem(value: 'Daily', child: Text('Daily Wage'))], onChanged: (v) => setD(() => salaryType = v ?? 'Monthly')),
+        TextField(controller: rate, decoration: InputDecoration(labelText: salaryType == 'Monthly' ? 'Monthly Salary' : 'Daily Wage'), keyboardType: TextInputType.number),
+        TextField(controller: overtime, decoration: const InputDecoration(labelText: 'Overtime Rate / Hour'), keyboardType: TextInputType.number),
+        TextField(controller: joining, decoration: const InputDecoration(labelText: 'Joining Date (YYYY-MM-DD)')),
+      ])),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save'))],
+    )));
+    if (result == true && name.text.trim().isNotEmpty) {
+      final data = {'name': name.text.trim(), 'phone': phone.text.trim(), 'address': address.text.trim(), 'salary_type': salaryType, 'salary_rate': double.tryParse(rate.text) ?? 0, 'overtime_rate': double.tryParse(overtime.text) ?? 0, 'joining_date': joining.text.trim(), 'active': 1};
+      if (staff == null) { await (await db.database).insert('staff', data); } else { await (await db.database).update('staff', data, where: 'id = ?', whereArgs: [staff['id']]); }
+      refresh();
+    }
+  }
+  Future<void> remove(Map<String,dynamic> row) async {
+    final yes = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(title: const Text('Delete staff?'), content: const Text('Staff profile, attendance and salary records will be deleted.'), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete'))]));
+    if (yes == true) { final database = await db.database; await database.transaction((txn) async { await txn.delete('staff_attendance', where: 'staff_id = ?', whereArgs: [row['id']]); await txn.delete('staff_payments', where: 'staff_id = ?', whereArgs: [row['id']]); await txn.delete('staff', where: 'id = ?', whereArgs: [row['id']]); }); refresh(); }
+  }
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Staff Management'), actions: [IconButton(onPressed: () => addOrEdit(), icon: const Icon(Icons.person_add_alt_1))]),
+    floatingActionButton: FloatingActionButton.extended(onPressed: () => addOrEdit(), icon: const Icon(Icons.add), label: const Text('Add Staff')),
+    body: FutureBuilder<List<Map<String,dynamic>>>(future: db.database.then((d) => d.query('staff', where: 'active = 1', orderBy: 'name COLLATE NOCASE')), builder: (context, snap) {
+      if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+      final rows = snap.data!;
+      if (rows.isEmpty) return const Center(child: Text('No staff added yet. Tap Add Staff.'));
+      return ListView(padding: const EdgeInsets.all(12), children: [
+        Card(child: ListTile(leading: const Icon(Icons.groups, color: navy), title: const Text('Staff Members'), trailing: Text('${rows.length}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20)))),
+        ...rows.map((r) => Card(child: ListTile(leading: const CircleAvatar(child: Icon(Icons.person)), title: Text(r['name'].toString(), style: const TextStyle(fontWeight: FontWeight.bold)), subtitle: Text('${r['salary_type']} • ${money((r['salary_rate'] as num?) ?? 0)}${r['phone'] == null || r['phone'].toString().isEmpty ? '' : '\n${r['phone']}'}'), isThreeLine: true, trailing: PopupMenuButton<String>(onSelected: (v) { if (v == 'edit') addOrEdit(r); if (v == 'delete') remove(r); }, itemBuilder: (_) => const [PopupMenuItem(value: 'edit', child: Text('Edit')), PopupMenuItem(value: 'delete', child: Text('Delete'))]), onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => StaffDetailsPage(staff: r))).then((_) => refresh())))),
+      ]);
+    }),
+  );
+}
+
+class StaffDetailsPage extends StatefulWidget {
+  final Map<String,dynamic> staff;
+  const StaffDetailsPage({super.key, required this.staff});
+  @override
+  State<StaffDetailsPage> createState() => _StaffDetailsPageState();
+}
+class _StaffDetailsPageState extends State<StaffDetailsPage> {
+  final db = FinanceDatabase.instance;
+  DateTime month = DateTime(DateTime.now().year, DateTime.now().month);
+  String period() => DateFormat('yyyy-MM').format(month);
+  Future<List<Map<String,dynamic>>> attendance() async => (await db.database).query('staff_attendance', where: 'staff_id = ? AND work_date LIKE ?', whereArgs: [widget.staff['id'], '${period()}%'], orderBy: 'work_date');
+  Future<List<Map<String,dynamic>>> payments() async => (await db.database).query('staff_payments', where: 'staff_id = ? AND period = ?', whereArgs: [widget.staff['id'], period()], orderBy: 'pay_date DESC');
+  Future<void> markAttendance(DateTime day) async {
+    final date = DateFormat('yyyy-MM-dd').format(day);
+    final rows = await (await db.database).query('staff_attendance', where: 'staff_id = ? AND work_date = ?', whereArgs: [widget.staff['id'], date], limit: 1);
+    String status = rows.isEmpty ? 'Present' : rows.first['status'].toString();
+    final checkIn = TextEditingController(text: rows.isEmpty ? '' : rows.first['check_in']?.toString() ?? '');
+    final checkOut = TextEditingController(text: rows.isEmpty ? '' : rows.first['check_out']?.toString() ?? '');
+    final overtime = TextEditingController(text: rows.isEmpty ? '0' : rows.first['overtime_hours'].toString());
+    final ok = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(title: Text('Attendance • ${DateFormat('dd MMM yyyy').format(day)}'), content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      DropdownButtonFormField<String>(value: status, items: const [DropdownMenuItem(value: 'Present', child: Text('Present')), DropdownMenuItem(value: 'Absent', child: Text('Absent')), DropdownMenuItem(value: 'Leave', child: Text('Leave'))], onChanged: (v) => setD(() => status = v ?? 'Present'), decoration: const InputDecoration(labelText: 'Status')),
+      TextField(controller: checkIn, decoration: const InputDecoration(labelText: 'Check-in (e.g. 09:00)')),
+      TextField(controller: checkOut, decoration: const InputDecoration(labelText: 'Check-out (e.g. 18:00)')),
+      TextField(controller: overtime, decoration: const InputDecoration(labelText: 'Overtime Hours'), keyboardType: TextInputType.number),
+    ])), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save'))])));
+    if (ok == true) { await (await db.database).insert('staff_attendance', {'staff_id': widget.staff['id'], 'work_date': date, 'status': status, 'check_in': checkIn.text.trim(), 'check_out': checkOut.text.trim(), 'overtime_hours': double.tryParse(overtime.text) ?? 0}, conflictAlgorithm: ConflictAlgorithm.replace); setState(() {}); }
+  }
+  Future<double> calculatedSalary() async {
+    final rows = await attendance();
+    final present = rows.where((r) => r['status'] == 'Present').length;
+    final overtime = rows.fold<double>(0, (sum, r) => sum + ((r['overtime_hours'] as num?)?.toDouble() ?? 0));
+    final base = widget.staff['salary_type'] == 'Daily'
+      ? present * ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0)
+      : ((widget.staff['salary_rate'] as num?)?.toDouble() ?? 0);
+    return base + overtime * ((widget.staff['overtime_rate'] as num?)?.toDouble() ?? 0);
+  }
+  Future<void> recordPayment({required String type}) async {
+    final amount = TextEditingController();
+    final note = TextEditingController();
+    String mode = 'Cash';
+    final due = await calculatedSalary();
+    final paidRows = await payments();
+    final paid = paidRows.fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+    final advance = paidRows.where((r) => r['payment_type'] == 'Advance').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+    final suggest = type == 'Salary' ? (due - paid - advance).clamp(0, double.infinity).toDouble() : 0.0;
+    if (suggest > 0) amount.text = suggest.toStringAsFixed(2);
+    final ok = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setD) => AlertDialog(title: Text(type == 'Advance' ? 'Record Advance' : 'Record Salary Payment'), content: Column(mainAxisSize: MainAxisSize.min, children: [
+      TextField(controller: amount, decoration: const InputDecoration(labelText: 'Amount'), keyboardType: TextInputType.number),
+      DropdownButtonFormField<String>(value: mode, decoration: const InputDecoration(labelText: 'Payment Mode'), items: const ['Cash','UPI','Bank Transfer','Cheque','Other'].map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(), onChanged: (v) => setD(() => mode = v ?? 'Cash')),
+      TextField(controller: note, decoration: const InputDecoration(labelText: 'Note (optional)')),
+      Align(alignment: Alignment.centerLeft, child: Text('Calculated salary: ${money(due)}')),
+    ]), actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save'))])));
+    final value = double.tryParse(amount.text) ?? 0;
+    if (ok == true && value > 0) { await (await db.database).insert('staff_payments', {'staff_id': widget.staff['id'], 'pay_date': DateFormat('yyyy-MM-dd').format(DateTime.now()), 'period': period(), 'payment_type': type, 'amount': value, 'payment_mode': mode, 'note': note.text.trim()}); setState(() {}); }
+  }
+  Future<void> exportStaffReport() async {
+    final att = await attendance();
+    final pays = await payments();
+    final present = att.where((r) => r['status'] == 'Present').length;
+    final absent = att.where((r) => r['status'] == 'Absent').length;
+    final leave = att.where((r) => r['status'] == 'Leave').length;
+    final overtime = att.fold<double>(0, (v, r) => v + ((r['overtime_hours'] as num?)?.toDouble() ?? 0));
+    final salary = await calculatedSalary();
+    final paid = pays.where((r) => r['payment_type'] == 'Salary').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+    final advance = pays.where((r) => r['payment_type'] == 'Advance').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+    final doc = pw.Document();
+    doc.addPage(pw.Page(pageFormat: PdfPageFormat.a4, build: (ctx) => pw.Padding(padding: const pw.EdgeInsets.all(28), child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+      pw.Text('STAFF MONTHLY REPORT', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
+      pw.SizedBox(height: 8), pw.Text(widget.staff['name'].toString(), style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+      pw.Text('Period: ${DateFormat('MMMM yyyy').format(month)}'),
+      pw.Divider(),
+      pw.Text('Attendance', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+      pw.Text('Present: $present    Absent: $absent    Leave: $leave    Overtime: ${overtime.toStringAsFixed(1)} hours'),
+      pw.SizedBox(height: 16),
+      pw.Text('Salary Summary', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+      pw.Text('Calculated salary: ${money(salary)}'),
+      pw.Text('Salary paid: ${money(paid)}'),
+      pw.Text('Advance paid: ${money(advance)}'),
+      pw.Text('Pending: ${money((salary - paid - advance).clamp(0, double.infinity))}'),
+      pw.SizedBox(height: 16),
+      pw.Text('Payment History', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+      pw.Table.fromTextArray(headers: ['Date', 'Type', 'Mode', 'Amount'], data: pays.map((r) => [dateLabel(r['pay_date']?.toString()), r['payment_type'].toString(), r['payment_mode'].toString(), money((r['amount'] as num?)?.toDouble())]).toList()),
+    ]))));
+    await Printing.layoutPdf(onLayout: (_) async => doc.save());
+  }
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text(widget.staff['name'].toString()), actions: [IconButton(tooltip: 'Export PDF Report', onPressed: exportStaffReport, icon: const Icon(Icons.picture_as_pdf))]),
+    body: FutureBuilder<List<Map<String,dynamic>>>(future: attendance(), builder: (context, aSnap) {
+      if (!aSnap.hasData) return const Center(child: CircularProgressIndicator());
+      final a = aSnap.data!;
+      final present = a.where((r) => r['status'] == 'Present').length;
+      final absent = a.where((r) => r['status'] == 'Absent').length;
+      final overtime = a.fold<double>(0, (v, r) => v + ((r['overtime_hours'] as num?)?.toDouble() ?? 0));
+      return ListView(padding: const EdgeInsets.all(14), children: [
+        Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(widget.staff['salary_type'].toString() == 'Monthly' ? 'Monthly Salary' : 'Daily Wage', style: const TextStyle(color: Colors.grey)),
+          Text(money((widget.staff['salary_rate'] as num?)?.toDouble()), style: const TextStyle(fontSize: 25, fontWeight: FontWeight.bold, color: navy)),
+          Text('Phone: ${widget.staff['phone'] ?? '-'}'),
+          Text('Overtime rate: ${money((widget.staff['overtime_rate'] as num?)?.toDouble())} / hour'),
+        ]))),
+        Row(children: [IconButton(onPressed: () => setState(() => month = DateTime(month.year, month.month - 1)), icon: const Icon(Icons.chevron_left)), Expanded(child: Center(child: Text(DateFormat('MMMM yyyy').format(month), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)))), IconButton(onPressed: () => setState(() => month = DateTime(month.year, month.month + 1)), icon: const Icon(Icons.chevron_right))]),
+        Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Monthly Attendance Calendar', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 10),
+          GridView.count(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), crossAxisCount: 7, childAspectRatio: 1.25, children: [
+            for (final w in ['M','T','W','T','F','S','S']) Center(child: Text(w, style: const TextStyle(fontWeight: FontWeight.bold))),
+            for (int i = 0; i < DateTime(month.year, month.month, 1).weekday - 1; i++) const SizedBox(),
+            for (int d = 1; d <= DateTime(month.year, month.month + 1, 0).day; d++)
+              Builder(builder: (ctx) {
+                final date = DateFormat('yyyy-MM-dd').format(DateTime(month.year, month.month, d));
+                final matches = a.where((r) => r['work_date'] == date);\n                final row = matches.isEmpty ? null : matches.first;
+                final status = row?['status']?.toString();
+                final color = status == 'Present' ? green : status == 'Absent' ? Colors.red : status == 'Leave' ? Colors.orange : Colors.grey.shade200;
+                return InkWell(onTap: () => markAttendance(DateTime(month.year, month.month, d)), child: Container(margin: const EdgeInsets.all(2), decoration: BoxDecoration(color: color.withValues(alpha: status == null ? .5 : .9), borderRadius: BorderRadius.circular(8)), child: Center(child: Text('$d', style: TextStyle(fontWeight: FontWeight.w600, color: status == null ? Colors.black87 : Colors.white)))));
+              }),
+          ]),
+          const SizedBox(height: 8),
+          Text('Present: $present   Absent: $absent   Overtime: ${overtime.toStringAsFixed(1)} hrs'),
+          const Text('Tap a date to record Present / Absent, manual check-in/out and overtime.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ]))),
+        FutureBuilder<double>(future: calculatedSalary(), builder: (context, calc) => Card(child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Salary Summary', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+          const SizedBox(height: 6), Text('Calculated salary: ${money(calc.data ?? 0)}'),
+          FutureBuilder<List<Map<String,dynamic>>>(future: payments(), builder: (context, pay) {
+            final list = pay.data ?? [];
+            final paid = list.where((r) => r['payment_type'] == 'Salary').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+            final advance = list.where((r) => r['payment_type'] == 'Advance').fold<double>(0, (v, r) => v + ((r['amount'] as num?)?.toDouble() ?? 0));
+            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('Salary paid: ${money(paid)}'), Text('Advance: ${money(advance)}'), Text('Pending: ${money(((calc.data ?? 0) - paid - advance).clamp(0, double.infinity))}')]);
+          }),
+          const SizedBox(height: 10), Wrap(spacing: 8, children: [FilledButton.tonal(onPressed: () => recordPayment(type: 'Advance'), child: const Text('Record Advance')), FilledButton(onPressed: () => recordPayment(type: 'Salary'), child: const Text('Pay Salary'))]),
+        ])))),
+        FutureBuilder<List<Map<String,dynamic>>>(future: payments(), builder: (context, pay) => Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Salary & Advance History', style: TextStyle(fontWeight: FontWeight.bold)),
+          if (pay.hasData) ...pay.data!.map((r) => ListTile(dense: true, contentPadding: EdgeInsets.zero, title: Text('${r['payment_type']} • ${money((r['amount'] as num?)?.toDouble())}'), subtitle: Text('${dateLabel(r['pay_date']?.toString())} • ${r['payment_mode']} ${r['note'] == null ? '' : '• ${r['note']}'}'))),
+          if (pay.hasData && pay.data!.isEmpty) const Text('No payments recorded for this month.'),
+        ])))),
+      ]);
+    }),
+  );
 }
