@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +13,9 @@ import 'package:printing/printing.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (kIsWeb) {
+    databaseFactory = databaseFactoryFfiWeb;
+  }
   await FinanceDatabase.instance.database;
   appLanguage.value = await FinanceDatabase.instance.getSetting('language') ?? 'en';
   runApp(const FinTrackApp());
@@ -63,8 +67,9 @@ class FinanceDatabase {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    final dbPath = await getDatabasesPath();
-    final dbFile = p.join(dbPath, 'fintrack_pro.db');
+    final dbFile = kIsWeb
+        ? 'fintrack_pro_web.db'
+        : p.join(await getDatabasesPath(), 'fintrack_pro.db');
     _database = await openDatabase(
       dbFile,
       version: 5,
