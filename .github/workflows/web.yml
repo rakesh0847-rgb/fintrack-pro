@@ -1,0 +1,56 @@
+name: FinTrack Pro iPhone Web
+
+on:
+  push:
+    branches:
+      - iphone-web-pwa
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create Web Platform
+        run: flutter create --platforms=web --org com.fintrackpro .
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Setup SQLite Web
+        run: dart run sqflite_common_ffi_web:setup
+
+      - name: Build Web App
+        run: flutter build web --release --base-href /fintrack-pro/
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
