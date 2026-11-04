@@ -1060,7 +1060,15 @@ class _StaffDetailsPageState extends State<StaffDetailsPage> {
         pw.TableHelper.fromTextArray(headers: ['Date', 'Type', 'Mode', 'Amount'], data: pays.map((r) => [dateLabel(r['pay_date']?.toString()), r['payment_type'].toString(), r['payment_mode'].toString(), money((r['amount'] as num?)?.toDouble())]).toList()),
       ])),
     ));
-    await Printing.layoutPdf(onLayout: (_) async => doc.save());
+    final pdfBytes = await doc.save();
+    if (kIsWeb) {
+      await Printing.sharePdf(
+        bytes: pdfBytes,
+        filename: 'Staff_Report_${DateFormat('yyyy_MM').format(month)}.pdf',
+      );
+    } else {
+      await Printing.layoutPdf(onLayout: (_) async => pdfBytes);
+    }
   }
   @override
   Widget build(BuildContext context) => Scaffold(
